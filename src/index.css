@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy: #1A1A2E;
+  --color-navy-light: #16213E;
+  --color-navy-dark: #0F0F23;
+  --color-gold: #D4AF37;
+  --color-gold-light: #F5E6A3;
+  --color-gold-dark: #8B7425;
+  --color-electric: #00D4FF;
+  --color-electric-dark: #0099CC;
+  --color-success: #00FF88;
+  --color-alert: #FF4444;
+  --color-card: #0C0C1E;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background: #1A1A2E;
+  color: white;
+}
+
+@keyframes pulse-gold {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.4); }
+  50% { box-shadow: 0 0 0 12px rgba(212, 175, 55, 0); }
+}
+@keyframes touch-flash {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.8); opacity: 0.6; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+@keyframes combo-pop {
+  0% { transform: scale(0.5); opacity: 0; }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); opacity: 1; }
+}
+@keyframes drop-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-8px); }
+  75% { transform: translateX(8px); }
+}
+@keyframes slide-up {
+  from { transform: translateY(40px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+@keyframes countdown-pulse {
+  0% { transform: scale(0.3); opacity: 0; }
+  50% { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+/* ====== HERO ANIMATIONS ====== */
+
+@keyframes hero-breathe {
+  0%, 100% {
+    filter: drop-shadow(0 0 40px rgba(212,175,55,0.1)) drop-shadow(0 20px 40px rgba(0,0,0,0.5));
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    filter: drop-shadow(0 0 70px rgba(212,175,55,0.22)) drop-shadow(0 25px 50px rgba(0,0,0,0.6));
+    transform: translateY(-6px) scale(1.008);
+  }
+}
+
+@keyframes hero-rim-light {
+  0% { opacity: 0.3; transform: translate(-50%, 0) rotate(0deg); }
+  25% { opacity: 0.6; }
+  50% { opacity: 0.35; transform: translate(-50%, 0) rotate(180deg); }
+  75% { opacity: 0.55; }
+  100% { opacity: 0.3; transform: translate(-50%, 0) rotate(360deg); }
+}
+
+@keyframes sparkle-drift {
+  0% { transform: translateY(0) scale(0); opacity: 0; }
+  15% { transform: translateY(-10px) scale(1); opacity: 1; }
+  85% { transform: translateY(-80px) scale(0.6); opacity: 0.6; }
+  100% { transform: translateY(-100px) scale(0); opacity: 0; }
+}
+
+@keyframes gold-sweep {
+  0% { left: -30%; opacity: 0; }
+  40% { opacity: 0.15; }
+  100% { left: 130%; opacity: 0; }
+}
+
+@keyframes hero-glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 80px 20px rgba(212,175,55,0.06), 0 0 120px 40px rgba(212,175,55,0.03);
+  }
+  50% {
+    box-shadow: 0 0 100px 30px rgba(212,175,55,0.12), 0 0 160px 60px rgba(212,175,55,0.06);
+  }
+}
+
+@keyframes badge-pulse {
+  0%, 100% { opacity: 0.6; letter-spacing: 0.25em; }
+  50% { opacity: 1; letter-spacing: 0.3em; }
+}
