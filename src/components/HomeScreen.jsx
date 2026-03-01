@@ -82,7 +82,7 @@ export default function HomeScreen({ onNavigate, profile }) {
       >
         <video
           ref={videoRef}
-          src="/assets/Vid6.mp4"
+          src={`${import.meta.env.BASE_URL}assets/Vid6.mp4`}
           muted
           loop
           playsInline
