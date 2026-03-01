@@ -238,32 +238,7 @@ export default function Football3D({
     const ball = new THREE.Mesh(ballGeo, ballMat);
     scene.add(ball);
 
-    // --- GLOW RING (orbit ring around ball) ---
-    let ring = null;
-    if (glow) {
-      const ringGeo = new THREE.TorusGeometry(1.12, 0.008, 8, 100);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: 0xD4AF37,
-        transparent: true,
-        opacity: 0.3,
-      });
-      ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.rotation.x = Math.PI * 0.42;
-      ring.rotation.z = Math.PI * 0.08;
-      scene.add(ring);
-
-      // Second faint ring
-      const ring2Geo = new THREE.TorusGeometry(1.25, 0.005, 8, 80);
-      const ring2Mat = new THREE.MeshBasicMaterial({
-        color: 0xD4AF37,
-        transparent: true,
-        opacity: 0.1,
-      });
-      const ring2 = new THREE.Mesh(ring2Geo, ring2Mat);
-      ring2.rotation.x = Math.PI * 0.55;
-      ring2.rotation.z = -Math.PI * 0.12;
-      scene.add(ring2);
-    }
+    // Glow rings removed — clean ball only
 
     // --- LIGHTING (stadium-style 3-point) ---
     // Key light — warm top-left (sun/stadium light)
@@ -377,10 +352,7 @@ export default function Football3D({
         ball.rotation.x += (mouseY * 0.3 - ball.rotation.x) * 0.03;
       }
 
-      // Ring animation
-      if (ring) {
-        ring.rotation.y = t * 0.3;
-      }
+      // (rings removed)
 
       renderer.render(scene, camera);
     };

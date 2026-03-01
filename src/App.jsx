@@ -1,6 +1,6 @@
 // ============================================
 // MODRIĆ JUGGLE CHALLENGE — Main App
-// Navigation + State + Profile + Transitions
+// Firebase Auth + Navigation + Profile + Cloud
 // ============================================
 
 import { useState, useCallback, useEffect, useRef } from 'react';
@@ -15,8 +15,12 @@ import DailyDrill from './components/DailyDrill';
 import GhostDuel from './components/GhostDuel';
 import ProfileScreen from './components/ProfileScreen';
 import ProfileSetup from './components/ProfileSetup';
+import AuthScreen from './components/AuthScreen';
+import InstallPrompt from './components/InstallPrompt';
 import VerificationEngine from './engine/verification';
 import soundEngine from './engine/sounds';
+import { onAuthChange, logOut } from './services/auth';
+import { syncProfileToCloud, recordCloudGame } from './services/firestore';
 import {
   loadProfile,
   saveProfile,
@@ -26,6 +30,7 @@ import {
 
 // App screens
 const SCREENS = {
+  AUTH: 'auth',
   HOME: 'home',
   ENV_CHECK: 'envCheck',
   ACTIVE_SESSION: 'activeSession',
@@ -38,7 +43,7 @@ const SCREENS = {
 };
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState(SCREENS.HOME);
+  const [currentScreen, setCurrentScreen] = useState(SCREENS.AUTH);
   const [gameMode, setGameMode] = useState('practice');
   const [sessionData, setSessionData] = useState(null);
   const [drillConfig, setDrillConfig] = useState(null);
@@ -46,16 +51,41 @@ export default function App() {
   const [userBestScore, setUserBestScore] = useState(null);
   const [profile, setProfile] = useState(() => loadProfile());
   const [newAchievements, setNewAchievements] = useState([]);
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   // Screen transition state
   const [transitioning, setTransitioning] = useState(false);
-  const [displayScreen, setDisplayScreen] = useState(() => {
-    // Check if profile setup needed
-    const p = loadProfile();
-    if (!p.setupComplete || !p.playerName) return SCREENS.PROFILE_SETUP;
-    return SCREENS.HOME;
-  });
+  const [displayScreen, setDisplayScreen] = useState(SCREENS.AUTH);
   const pendingScreenRef = useRef(null);
+
+  // Firebase auth state listener
+  useEffect(() => {
+    const unsubscribe = onAuthChange((user) => {
+      setFirebaseUser(user);
+      setAuthLoading(false);
+
+      if (user) {
+        // User is signed in — go to profile setup or home
+        const p = loadProfile();
+        if (!p.setupComplete || !p.playerName) {
+          setDisplayScreen(SCREENS.PROFILE_SETUP);
+          setCurrentScreen(SCREENS.PROFILE_SETUP);
+        } else {
+          setDisplayScreen(SCREENS.HOME);
+          setCurrentScreen(SCREENS.HOME);
+
+          // Sync local profile to cloud (non-blocking)
+          syncProfileToCloud(user.uid, p).catch(console.warn);
+        }
+      } else {
+        // User signed out — show auth
+        setDisplayScreen(SCREENS.AUTH);
+        setCurrentScreen(SCREENS.AUTH);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Initialize sound engine on first interaction
   useEffect(() => {
@@ -87,7 +117,6 @@ export default function App() {
     setTransitioning(true);
     soundEngine.playClick();
 
-    // After fade-out completes, swap screen and fade-in
     setTimeout(() => {
       setDisplayScreen(nextScreen);
       setCurrentScreen(nextScreen);
@@ -104,10 +133,45 @@ export default function App() {
         combo: parseInt(params.get('combo')) || 0,
         name: params.get('name') || 'Challenger',
       });
-      setDisplayScreen(SCREENS.GHOST_DUEL);
-      setCurrentScreen(SCREENS.GHOST_DUEL);
     }
   }, []);
+
+  // Auth success handler
+  const handleAuthSuccess = useCallback((user, displayName) => {
+    setFirebaseUser(user);
+    const p = loadProfile();
+    if (!p.setupComplete || !p.playerName) {
+      // Pre-fill name from Google if available
+      if (displayName && !p.playerName) {
+        const shortName = displayName.split(' ')[0].slice(0, 16);
+        p.playerName = shortName;
+        saveProfile(p);
+        setProfile(p);
+      }
+      transitionTo(SCREENS.PROFILE_SETUP);
+    } else {
+      transitionTo(SCREENS.HOME);
+      // Sync to cloud
+      syncProfileToCloud(user.uid, p).catch(console.warn);
+    }
+  }, [transitionTo]);
+
+  // Skip auth (guest mode)
+  const handleSkipAuth = useCallback(() => {
+    const p = loadProfile();
+    if (!p.setupComplete || !p.playerName) {
+      transitionTo(SCREENS.PROFILE_SETUP);
+    } else {
+      transitionTo(SCREENS.HOME);
+    }
+  }, [transitionTo]);
+
+  // Sign out
+  const handleSignOut = useCallback(async () => {
+    await logOut();
+    setFirebaseUser(null);
+    transitionTo(SCREENS.AUTH);
+  }, [transitionTo]);
 
   // Navigation handler
   const handleNavigate = useCallback((screen, data = {}) => {
@@ -148,15 +212,25 @@ export default function App() {
     saveProfile(updatedProfile);
     setProfile(updatedProfile);
     soundEngine.playSessionComplete();
+
+    // Sync to cloud if authenticated
+    if (firebaseUser) {
+      syncProfileToCloud(firebaseUser.uid, updatedProfile).catch(console.warn);
+    }
+
     transitionTo(SCREENS.HOME);
-  }, [profile, transitionTo]);
+  }, [profile, transitionTo, firebaseUser]);
 
   // Profile save (from ProfileScreen edit)
   const handleProfileSave = useCallback((updatedProfile) => {
     saveProfile(updatedProfile);
     setProfile(updatedProfile);
     soundEngine.playClick();
-  }, []);
+
+    if (firebaseUser) {
+      syncProfileToCloud(firebaseUser.uid, updatedProfile).catch(console.warn);
+    }
+  }, [firebaseUser]);
 
   // Environment check passed
   const handleEnvReady = useCallback(() => {
@@ -180,7 +254,7 @@ export default function App() {
       setUserBestScore(data.totalScore);
     }
 
-    // Record game result to profile
+    // Record game result locally
     const { profile: updatedProfile, newlyUnlocked } = recordGameResult({
       score: data.totalScore || 0,
       touches: data.totalTouches || 0,
@@ -191,16 +265,27 @@ export default function App() {
     });
     setProfile(updatedProfile);
 
+    // Record to cloud if authenticated
+    if (firebaseUser) {
+      recordCloudGame(firebaseUser.uid, {
+        score: data.totalScore || 0,
+        touches: data.totalTouches || 0,
+        bestCombo: data.bestCombo || 0,
+        mode: gameMode,
+        verified: verification.verified || false,
+        duration: data.duration || 60,
+      }).catch(console.warn);
+    }
+
     // Show achievement notifications
     if (newlyUnlocked.length > 0) {
       setNewAchievements(newlyUnlocked);
-      // Auto-dismiss after 4 seconds
       setTimeout(() => setNewAchievements([]), 4000);
       soundEngine.playComboMilestone(50);
     }
 
     transitionTo(SCREENS.RESULTS);
-  }, [gameMode, userBestScore, transitionTo]);
+  }, [gameMode, userBestScore, transitionTo, firebaseUser]);
 
   // Daily drill start
   const handleDrillStart = useCallback((drill) => {
@@ -234,20 +319,43 @@ export default function App() {
     transitionTo(SCREENS.ENV_CHECK);
   }, [transitionTo]);
 
+  // Loading spinner while checking auth
+  if (authLoading) {
+    return (
+      <div className="w-full h-full bg-[#1A1A2E] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div
+            className="w-10 h-10 rounded-full border-2 border-gold/30 border-t-gold animate-spin"
+          />
+          <span className="text-xs text-white/30 tracking-widest uppercase">Loading</span>
+        </div>
+      </div>
+    );
+  }
+
   // Render current screen
   const renderScreen = () => {
     switch (displayScreen) {
+      case SCREENS.AUTH:
+        return (
+          <AuthScreen
+            onAuthSuccess={handleAuthSuccess}
+            onSkip={handleSkipAuth}
+          />
+        );
       case SCREENS.PROFILE_SETUP:
-        return <ProfileSetup onComplete={handleProfileSetupComplete} />;
+        return <ProfileSetup onComplete={handleProfileSetupComplete} initialName={profile.playerName} />;
       case SCREENS.HOME:
         return <HomeScreen onNavigate={handleNavigate} profile={profile} />;
       case SCREENS.PROFILE:
         return (
           <ProfileScreen
             profile={profile}
+            firebaseUser={firebaseUser}
             onSave={handleProfileSave}
             onBack={handleHome}
             onNavigate={handleNavigate}
+            onSignOut={handleSignOut}
           />
         );
       case SCREENS.ENV_CHECK:
@@ -308,7 +416,7 @@ export default function App() {
   };
 
   return (
-    <div className="w-full h-full bg-[#1A1A2E] relative overflow-hidden">
+    <div className="w-full h-full bg-[#030510] relative overflow-hidden">
       <div
         className="w-full h-full transition-all duration-200 ease-in-out"
         style={{
@@ -318,6 +426,9 @@ export default function App() {
       >
         {renderScreen()}
       </div>
+
+      {/* PWA Install Prompt — only on home screen */}
+      {displayScreen === SCREENS.HOME && <InstallPrompt />}
 
       {/* Achievement unlock notification overlay */}
       {newAchievements.length > 0 && (

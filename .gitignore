@@ -1,1 +1,16 @@
-node_modules\ndist\n.DS_Store\n*.log\nsave-image-server.cjs\npublic/image-processor.html
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# OS files
+.DS_Store
+*.log
+
+# Generated files
+save-image-server.cjs
+public/image-processor.html
+
+# Vercel
+.vercel

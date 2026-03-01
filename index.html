@@ -3,26 +3,42 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" href="/football-icon.svg" />
-    <link rel="manifest" href="/manifest.json" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <!-- PWA manifest injected by vite-plugin-pwa -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#D4AF37" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Juggle" />
+    <meta name="apple-mobile-web-app-title" content="Modrić Juggle" />
     <link rel="apple-touch-icon" href="/assets/icon-192.png" />
     <meta name="description" content="AI-verified football juggling game sponsored by Luka Modrić. Test your skills!" />
+
+    <!-- iOS Splash Screens -->
+    <!-- iPhone 14 / 13 / 12 (390×844 @3x) -->
+    <link rel="apple-touch-startup-image"
+      media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)"
+      href="/assets/splash-1170x2532.png" />
+    <!-- iPhone 14 Pro / 15 (393×852 @3x) -->
+    <link rel="apple-touch-startup-image"
+      media="(device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3)"
+      href="/assets/splash-1179x2556.png" />
+    <!-- iPhone 14 Pro Max / 15 Plus (430×932 @3x) -->
+    <link rel="apple-touch-startup-image"
+      media="(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3)"
+      href="/assets/splash-1290x2796.png" />
+    <!-- iPhone SE 3rd / 8 (375×667 @2x) -->
+    <link rel="apple-touch-startup-image"
+      media="(device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2)"
+      href="/assets/splash-750x1334.png" />
+    <!-- iPhone 11 / XR (414×896 @2x) -->
+    <link rel="apple-touch-startup-image"
+      media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2)"
+      href="/assets/splash-828x1792.png" />
+
     <title>Modrić Juggle Challenge</title>
   </head>
-  <body class="bg-[#1A1A2E] text-white overflow-hidden">
+  <body class="bg-[#030510] text-white overflow-hidden">
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
-    <script>
-      // Register service worker
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/sw.js').catch(() => {});
-        });
-      }
-    </script>
+    <!-- Service worker registered automatically by vite-plugin-pwa -->
   </body>
 </html>
