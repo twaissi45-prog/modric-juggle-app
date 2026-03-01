@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  base: '/modric-juggle-app/',
   plugins: [
     react(),
     tailwindcss(),
@@ -12,12 +13,12 @@ export default defineConfig({
       includeAssets: ['football-icon.svg', 'assets/icon-192.png', 'assets/icon-512.png'],
 
       manifest: {
-        id: '/',
+        id: '/modric-juggle-app/',
         name: 'Modrić Juggling Challenge',
         short_name: 'Modrić Juggle',
         description: 'AI-verified football juggling game sponsored by Luka Modrić. Test your skills!',
-        start_url: '/',
-        scope: '/',
+        start_url: '/modric-juggle-app/',
+        scope: '/modric-juggle-app/',
         display: 'standalone',
         orientation: 'portrait',
         background_color: '#030510',
@@ -73,7 +74,7 @@ export default defineConfig({
         globIgnores: ['**/*.mp4'],
 
         // SPA fallback
-        navigateFallback: '/index.html',
+        navigateFallback: '/modric-juggle-app/index.html',
         navigateFallbackDenylist: [/^\/api/],
 
         // Runtime caching strategies
