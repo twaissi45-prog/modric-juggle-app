@@ -6,8 +6,8 @@
 const POSE_CONFIG = {
   modelComplexity: 1,
   smoothLandmarks: true,
-  minDetectionConfidence: 0.5,
-  minTrackingConfidence: 0.5,
+  minDetectionConfidence: 0.4,  // lowered for mobile — more forgiving
+  minTrackingConfidence: 0.4,   // lowered for mobile
 };
 
 // Body zone landmark indices (MediaPipe 33 landmarks)

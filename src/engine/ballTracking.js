@@ -1,6 +1,6 @@
 // ============================================
 // STEP 2: Ball Tracking Engine
-// Motion detection + heuristic ball tracking
+// Motion detection + body-masked ball tracking
 // ============================================
 
 export const BALL_STATES = {
@@ -11,15 +11,17 @@ export const BALL_STATES = {
 };
 
 const CONFIG = {
-  motionThreshold: 25,
-  minBallSize: 15,
-  maxBallSize: 100,
-  maxAspectRatio: 2.0,
-  historyLength: 10,
-  lostTimeout: 500,
-  dropTimeout: 300,
-  maxJumpDistance: 200,
+  motionThreshold: 18,        // lowered from 25 — more sensitive
+  minBallSize: 10,            // lowered from 15 — catch smaller ball
+  maxBallSize: 150,           // raised from 100 — ball can look big on phone
+  maxAspectRatio: 2.5,        // slightly more forgiving shape
+  historyLength: 12,          // more history for trajectory
+  lostTimeout: 700,           // raised from 500 — more patient
+  dropTimeout: 400,           // raised from 300
+  maxJumpDistance: 250,        // raised from 200 — faster movement ok
   proximityThreshold: 70,
+  bodyMaskRadius: 35,          // NEW: exclude motion within 35px of body landmarks
+  stride: 3,                   // NEW: pixel skip (was hardcoded 4)
 };
 
 export class BallTracker {
@@ -42,7 +44,7 @@ export class BallTracker {
 
   initCanvas(width, height) {
     this.processCanvas = document.createElement('canvas');
-    this.processCanvas.width = Math.floor(width / 2); // Half res for performance
+    this.processCanvas.width = Math.floor(width / 2);
     this.processCanvas.height = Math.floor(height / 2);
     this.processCtx = this.processCanvas.getContext('2d', { willReadFrequently: true });
   }
@@ -65,13 +67,16 @@ export class BallTracker {
       return;
     }
 
-    // Motion detection: frame difference
-    const motionMap = this.detectMotion(currentFrame.data, this.prevFrameData.data, w, h);
+    // Get body landmark positions for masking (at half-res)
+    const bodyPoints = this.getBodyMaskPoints(poseDetector, w, h);
+
+    // Motion detection: frame difference with body masking
+    const motionMap = this.detectMotion(currentFrame.data, this.prevFrameData.data, w, h, bodyPoints);
 
     // Find ball candidates from motion clusters
     const candidates = this.findBallCandidates(motionMap, w, h);
 
-    // Filter with pose data (ball should be near body)
+    // Filter candidates
     const bodyWidth = poseDetector ? poseDetector.getBodyWidth(w) : w * 0.5;
     const filteredCandidates = this.filterCandidates(candidates, bodyWidth, w, h);
 
@@ -85,9 +90,36 @@ export class BallTracker {
     this.prevFrameData = currentFrame;
   }
 
-  detectMotion(current, previous, width, height) {
+  // NEW: Get body landmark positions at half-res for masking
+  getBodyMaskPoints(poseDetector, width, height) {
+    if (!poseDetector || !poseDetector.landmarks) return [];
+
+    const points = [];
+    for (const lm of poseDetector.landmarks) {
+      if (lm.visibility > 0.3) {
+        points.push({
+          x: lm.x * width,
+          y: lm.y * height,
+        });
+      }
+    }
+    return points;
+  }
+
+  // NEW: Check if a pixel is near any body landmark
+  isNearBody(x, y, bodyPoints) {
+    const r = CONFIG.bodyMaskRadius;
+    for (const bp of bodyPoints) {
+      const dx = x - bp.x;
+      const dy = y - bp.y;
+      if (dx * dx + dy * dy < r * r) return true;
+    }
+    return false;
+  }
+
+  detectMotion(current, previous, width, height, bodyPoints) {
     const motionPixels = [];
-    const stride = 4; // Skip pixels for performance
+    const stride = CONFIG.stride;
 
     for (let y = 0; y < height; y += stride) {
       for (let x = 0; x < width; x += stride) {
@@ -98,6 +130,10 @@ export class BallTracker {
         const diff = Math.abs(gCurr - gPrev);
 
         if (diff > CONFIG.motionThreshold) {
+          // BODY MASKING: skip motion that's ON the body
+          if (bodyPoints.length > 0 && this.isNearBody(x, y, bodyPoints)) {
+            continue; // This motion is from body movement, not the ball
+          }
           motionPixels.push({ x, y, intensity: diff });
         }
       }
@@ -107,7 +143,7 @@ export class BallTracker {
   }
 
   findBallCandidates(motionPixels, width, height) {
-    if (motionPixels.length < 5) return [];
+    if (motionPixels.length < 3) return []; // lowered from 5
 
     // Simple clustering: group nearby motion pixels
     const clusters = [];
@@ -122,9 +158,8 @@ export class BallTracker {
       for (let j = i + 1; j < motionPixels.length; j++) {
         if (used.has(j)) continue;
         const p = motionPixels[j];
-        // Check proximity to any point in cluster
         const nearest = cluster.some(
-          c => Math.abs(c.x - p.x) < 30 && Math.abs(c.y - p.y) < 30
+          c => Math.abs(c.x - p.x) < 35 && Math.abs(c.y - p.y) < 35 // widened from 30
         );
         if (nearest) {
           cluster.push(p);
@@ -132,7 +167,7 @@ export class BallTracker {
         }
       }
 
-      if (cluster.length >= 3) {
+      if (cluster.length >= 2) { // lowered from 3
         clusters.push(cluster);
       }
     }
@@ -165,11 +200,8 @@ export class BallTracker {
 
   filterCandidates(candidates, bodyWidth, canvasWidth, canvasHeight) {
     return candidates.filter(c => {
-      // Size filter
       if (c.size < CONFIG.minBallSize || c.size > CONFIG.maxBallSize) return false;
-      // Aspect ratio (roughly circular)
       if (c.aspect > CONFIG.maxAspectRatio) return false;
-      // Must be in frame
       if (c.x < 0 || c.x > canvasWidth || c.y < 0 || c.y > canvasHeight) return false;
       return true;
     });
@@ -178,28 +210,30 @@ export class BallTracker {
   selectBestCandidate(candidates, width, height) {
     if (candidates.length === 0) return null;
 
-    // Score each candidate
     return candidates.reduce((best, c) => {
       let score = 0;
 
       // Circularity bonus (lower aspect = more circular)
-      score += (2.0 - c.aspect) * 20;
+      score += (2.5 - c.aspect) * 20;
 
-      // Trajectory prediction bonus
+      // Trajectory prediction bonus (stronger weight)
       if (this.position) {
         const predicted = this.predictPosition();
         if (predicted) {
           const dist = Math.hypot(c.x - predicted.x, c.y - predicted.y);
-          score += Math.max(0, 50 - dist);
+          score += Math.max(0, 80 - dist); // raised from 50
         }
       }
 
       // Motion intensity
       score += c.avgIntensity * 0.5;
 
-      // Size sweet spot (prefer 30-60 pixel diameter)
-      const idealSize = 40;
-      score -= Math.abs(c.size - idealSize) * 0.3;
+      // Size sweet spot (prefer 20-80 pixel diameter)
+      const idealSize = 45;
+      score -= Math.abs(c.size - idealSize) * 0.2; // less penalty
+
+      // Pixel density — more pixels = more likely a real object
+      score += c.pixelCount * 2;
 
       c.score = score;
       return !best || score > best.score ? c : best;
@@ -227,8 +261,7 @@ export class BallTracker {
       if (this.position) {
         const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
         if (jump > CONFIG.maxJumpDistance) {
-          // Too big a jump — might be noise
-          this.confidence = Math.max(0, this.confidence - 0.2);
+          this.confidence = Math.max(0, this.confidence - 0.1); // less harsh penalty
           return;
         }
       }
@@ -247,14 +280,14 @@ export class BallTracker {
       }
 
       this.lastDetectedTime = now;
-      this.confidence = Math.min(1, this.confidence + 0.15);
+      this.confidence = Math.min(1, this.confidence + 0.25); // faster lock-on (was 0.15)
       this.frameCount++;
       this.totalConfidence += this.confidence;
 
       // Check if ball is below ankles (dropped)
       if (poseDetector) {
         const ankleY = poseDetector.getAnkleLevelY(height * 2);
-        if (fullY > ankleY + 30 && this.state === BALL_STATES.TRACKING) {
+        if (fullY > ankleY + 50 && this.state === BALL_STATES.TRACKING) { // more buffer (was 30)
           this.state = BALL_STATES.DROPPED;
           return;
         }
@@ -263,7 +296,7 @@ export class BallTracker {
       this.state = BALL_STATES.TRACKING;
     } else {
       // No candidate found
-      this.confidence = Math.max(0, this.confidence - 0.05);
+      this.confidence = Math.max(0, this.confidence - 0.03); // slower decay (was 0.05)
 
       const timeSinceLast = now - this.lastDetectedTime;
       if (timeSinceLast > CONFIG.lostTimeout && this.state === BALL_STATES.TRACKING) {
@@ -314,6 +347,15 @@ export class BallTracker {
       ctx.lineWidth = 1;
       ctx.stroke();
     }
+
+    // Confidence bar (small bar under ball indicator)
+    const barWidth = 30;
+    const barX = x - barWidth / 2;
+    const barY = y + 30;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.fillRect(barX, barY, barWidth, 3);
+    ctx.fillStyle = this.confidence > 0.5 ? 'rgba(0, 212, 255, 0.8)' : 'rgba(255, 180, 0, 0.8)';
+    ctx.fillRect(barX, barY, barWidth * this.confidence, 3);
   }
 
   reset() {
