@@ -30,6 +30,7 @@ const GhostDuel = lazy(() => import('./components/GhostDuel'));
 const ProfileScreen = lazy(() => import('./components/ProfileScreen'));
 const ProfileSetup = lazy(() => import('./components/ProfileSetup'));
 const InstallPrompt = lazy(() => import('./components/InstallPrompt'));
+const HowItWorks = lazy(() => import('./components/HowItWorks'));
 
 // Loading fallback for lazy screens
 function ScreenLoader() {
@@ -68,6 +69,7 @@ export default function App() {
   const [newAchievements, setNewAchievements] = useState([]);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
 
   // Screen transition state
   const [transitioning, setTransitioning] = useState(false);
@@ -209,6 +211,7 @@ export default function App() {
         transitionTo(SCREENS.PROFILE);
         break;
       case 'howItWorks':
+        setShowHowItWorks(true);
         break;
       default:
         transitionTo(screen);
@@ -448,6 +451,13 @@ export default function App() {
 
       {/* PWA Install Prompt — only on home screen */}
       {displayScreen === SCREENS.HOME && <InstallPrompt />}
+
+      {/* How It Works modal overlay */}
+      {showHowItWorks && (
+        <Suspense fallback={null}>
+          <HowItWorks onClose={() => setShowHowItWorks(false)} />
+        </Suspense>
+      )}
 
       {/* Achievement unlock notification overlay */}
       {newAchievements.length > 0 && (
