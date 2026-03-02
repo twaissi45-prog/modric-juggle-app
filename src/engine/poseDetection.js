@@ -42,6 +42,7 @@ export class PoseDetector {
     this.onResults = null;
     this.frameCount = 0;
     this.totalConfidence = 0;
+    this.segmentationMask = null; // Exposed for body exclusion in ball tracking
   }
 
   async initialize(videoElement, onResultsCallback) {
@@ -78,11 +79,14 @@ export class PoseDetector {
       this.poseConfidence = 0;
     }
 
+    // Store segmentation mask for body exclusion in ball tracking
+    this.segmentationMask = results.segmentationMask || null;
+
     if (this.onResults) {
       this.onResults({
         landmarks: this.landmarks,
         confidence: this.poseConfidence,
-        segmentationMask: results.segmentationMask,
+        segmentationMask: this.segmentationMask,
       });
     }
   }

@@ -2,11 +2,12 @@
 // ActiveSession — Core Gameplay Screen
 // Camera feed, pose detection, ball tracking,
 // touch detection, scoring, HUD overlay
+// Now with TensorFlow.js COCO-SSD ML detection
 // ============================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PoseDetector } from '../engine/poseDetection.js';
-import { BallTracker, BALL_STATES } from '../engine/ballTracking.js';
+import { BallTracker, MLBallDetector, BALL_STATES } from '../engine/ballTracking.js';
 import { TouchDetector } from '../engine/touchDetection.js';
 import { ScoringEngine, COMBO_TIERS } from '../engine/scoring.js';
 
@@ -75,6 +76,9 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
   const [countdownValue, setCountdownValue] = useState(null);
   const [drops, setDrops] = useState(0);
 
+  // --- ML loading state ---
+  const [mlLoadingStatus, setMlLoadingStatus] = useState('loading'); // 'loading' | 'ready' | 'fallback'
+
   // --- UI effect state ---
   const [showDrop, setShowDrop] = useState(false);
   const [lastTouchZone, setLastTouchZone] = useState(null);
@@ -93,12 +97,14 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
   const ballTrackerRef = useRef(null);
   const touchDetectorRef = useRef(null);
   const scoringEngineRef = useRef(null);
+  const mlDetectorRef = useRef(null);
   const animFrameRef = useRef(null);
   const timerIntervalRef = useRef(null);
   const sessionStartTimeRef = useRef(null);
   const isRunningRef = useRef(false);
   const wasBallDropped = useRef(false);
   const streamRef = useRef(null);
+  const mlLoopRef = useRef(null);
 
   // Keep isRunning ref in sync
   useEffect(() => {
@@ -111,6 +117,7 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     ballTrackerRef.current = new BallTracker();
     touchDetectorRef.current = new TouchDetector();
     scoringEngineRef.current = new ScoringEngine();
+    mlDetectorRef.current = new MLBallDetector();
 
     // Wire up scoring callbacks
     scoringEngineRef.current.onScoreUpdate = (scoreData) => {
@@ -196,14 +203,39 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     }
   }, []);
 
+  // --- Async ML detection loop (runs independently from game loop) ---
+  const startMLDetectionLoop = useCallback(() => {
+    const mlDetector = mlDetectorRef.current;
+    const video = videoRef.current;
+
+    if (!mlDetector || !mlDetector.isReady || !video) return;
+
+    async function mlLoop() {
+      if (!isRunningRef.current) return;
+
+      try {
+        const result = await mlDetector.detect(video);
+        // Result is stored in mlDetector.lastDetection and picked up by game loop
+      } catch (err) {
+        // Silently continue
+      }
+
+      // Schedule next ML detection
+      mlLoopRef.current = setTimeout(mlLoop, 250);
+    }
+
+    mlLoop();
+  }, []);
+
   // --- Game loop ---
-  const gameLoop = useCallback(async () => {
+  const gameLoop = useCallback(() => {
     if (!isRunningRef.current) return;
 
     const video = videoRef.current;
     const pose = poseDetectorRef.current;
     const ball = ballTrackerRef.current;
     const touch = touchDetectorRef.current;
+    const mlDetector = mlDetectorRef.current;
 
     if (!video || !pose || !ball || !touch) {
       animFrameRef.current = requestAnimationFrame(gameLoop);
@@ -225,18 +257,23 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     }
 
     try {
-      // 1. Send frame to pose detector
+      // 1. Send frame to pose detector (async, results come via callback)
       if (pose.isInitialized) {
-        await pose.sendFrame(video);
+        pose.sendFrame(video);
       }
 
-      // 2. Process ball tracking
-      ball.processFrame(video, pose);
+      // 2. Get latest ML detection (non-blocking — uses cached result)
+      const mlResult = mlDetector && mlDetector.isReady
+        ? mlDetector.lastDetection
+        : null;
 
-      // 3. Check for touches
+      // 3. Process ball tracking with ML result (if available)
+      ball.processFrame(video, pose, mlResult);
+
+      // 4. Check for touches
       touch.checkTouch(ball, pose, vw, vh);
 
-      // 4. Check for drops
+      // 5. Check for drops
       if (ball.state === BALL_STATES.DROPPED && !wasBallDropped.current) {
         wasBallDropped.current = true;
         const se = scoringEngineRef.current;
@@ -254,13 +291,13 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         wasBallDropped.current = false;
       }
 
-      // 5. Draw pose skeleton overlay
+      // 6. Draw pose skeleton overlay
       if (poseCanvasRef.current) {
         const ctx = poseCanvasRef.current.getContext('2d');
         pose.drawSkeleton(ctx, vw, vh);
       }
 
-      // 6. Draw ball indicator overlay
+      // 7. Draw ball indicator overlay
       if (ballCanvasRef.current) {
         const ctx = ballCanvasRef.current.getContext('2d');
         ctx.clearRect(0, 0, vw, vh);
@@ -306,6 +343,12 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
   // --- End session ---
   const endSession = useCallback(() => {
     setIsRunning(false);
+
+    // Stop ML detection loop
+    if (mlLoopRef.current) {
+      clearTimeout(mlLoopRef.current);
+      mlLoopRef.current = null;
+    }
 
     // Stop timers and animation frame
     if (timerIntervalRef.current) {
@@ -358,7 +401,10 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     setIsRunning(true);
     startTimer();
     gameLoop();
-  }, [startTimer, gameLoop]);
+
+    // Start ML detection loop (runs async alongside game loop)
+    startMLDetectionLoop();
+  }, [startTimer, gameLoop, startMLDetectionLoop]);
 
   // --- Countdown sequence for ranked/drill ---
   const startCountdown = useCallback(() => {
@@ -401,7 +447,27 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         }
       }
 
-      // 4. Start countdown or game
+      // 4. Initialize ML ball detector (async, don't block game start)
+      const mlDetector = mlDetectorRef.current;
+      if (mlDetector) {
+        setMlLoadingStatus('loading');
+        mlDetector.initialize().then(() => {
+          if (!mounted) return;
+          if (mlDetector.isReady) {
+            setMlLoadingStatus('ready');
+            console.log('[ActiveSession] ML ball detection ready');
+            // If game already running, start ML loop
+            if (isRunningRef.current) {
+              startMLDetectionLoop();
+            }
+          } else {
+            setMlLoadingStatus('fallback');
+            console.log('[ActiveSession] ML failed, using motion-only tracking');
+          }
+        });
+      }
+
+      // 5. Start countdown or game (don't wait for ML)
       if (!mounted) return;
 
       if (gameMode === 'ranked' || gameMode === 'drill') {
@@ -419,6 +485,7 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
       // Cleanup
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (mlLoopRef.current) clearTimeout(mlLoopRef.current);
       stopCamera();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -458,6 +525,43 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-black/60 to-transparent" />
         <div className="absolute bottom-0 left-0 right-0 h-28 bg-gradient-to-t from-black/60 to-transparent" />
       </div>
+
+      {/* ==== ML Loading Overlay ==== */}
+      {mlLoadingStatus === 'loading' && !isCountingDown && (
+        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30">
+          <div className="bg-black/60 backdrop-blur-sm rounded-lg px-4 py-2 flex items-center gap-2 border border-white/10">
+            <div className="w-3 h-3 border-2 border-gold border-t-transparent rounded-full animate-spin" />
+            <span className="text-white/70 text-xs font-medium">Loading AI Ball Detection...</span>
+          </div>
+        </div>
+      )}
+
+      {/* ML Ready badge (shows briefly) */}
+      {mlLoadingStatus === 'ready' && !isCountingDown && (
+        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30">
+          <div
+            className="bg-success/20 backdrop-blur-sm rounded-lg px-4 py-2 flex items-center gap-2 border border-success/30"
+            style={{ animation: 'fadeOut 3s ease-out forwards' }}
+          >
+            <svg className="w-3 h-3 text-success" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+            </svg>
+            <span className="text-success text-xs font-medium">AI Ball Detection Active</span>
+          </div>
+        </div>
+      )}
+
+      {/* ML Fallback notice */}
+      {mlLoadingStatus === 'fallback' && !isCountingDown && (
+        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30">
+          <div
+            className="bg-amber-500/20 backdrop-blur-sm rounded-lg px-4 py-2 flex items-center gap-2 border border-amber-500/30"
+            style={{ animation: 'fadeOut 5s ease-out 2s forwards' }}
+          >
+            <span className="text-amber-400 text-xs font-medium">Using Motion Detection</span>
+          </div>
+        </div>
+      )}
 
       {/* ==== COUNTDOWN OVERLAY ==== */}
       {isCountingDown && (
@@ -705,6 +809,15 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           </p>
         </div>
       )}
+
+      {/* Inline CSS animations */}
+      <style>{`
+        @keyframes fadeOut {
+          0% { opacity: 1; }
+          70% { opacity: 1; }
+          100% { opacity: 0; pointer-events: none; }
+        }
+      `}</style>
     </div>
   );
 }
