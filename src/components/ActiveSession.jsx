@@ -100,6 +100,11 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     mlStatus: 'loading',
   });
 
+  // --- Phase 3: Guidance hints ---
+  const [guidanceHint, setGuidanceHint] = useState(null);
+  const noBallSinceRef = useRef(0);
+  const noBodySinceRef = useRef(0);
+
   // --- Refs ---
   const videoRef = useRef(null);
   const poseCanvasRef = useRef(null);
@@ -327,10 +332,13 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
       const now = Date.now();
       if (now - lastDebugUpdateRef.current > 400) {
         lastDebugUpdateRef.current = now;
+        const poseOk = !!pose.landmarks;
+        const ballOk = ball.state === BALL_STATES.TRACKING;
+
         setDebugInfo({
-          poseDetected: !!pose.landmarks,
+          poseDetected: poseOk,
           poseInit: pose.isInitialized,
-          ballDetected: ball.state === BALL_STATES.TRACKING,
+          ballDetected: ballOk,
           ballSource: ball.lastSource === 'ml' ? 'ML'
                     : ball.lastSource === 'color' ? 'Color'
                     : ball.position ? 'Motion' : 'None',
@@ -338,7 +346,29 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           mlStatus: mlDetector
             ? mlDetector.isReady ? 'ready' : mlDetector.isLoading ? 'loading' : 'failed'
             : 'none',
+          trackConf: Math.round((ball.trackConfidence || 0) * 100),
+          ambient: Math.round(ball.ambientBrightness || 128),
         });
+
+        // Phase 3: Guidance hints
+        if (!poseOk) {
+          noBodySinceRef.current = noBodySinceRef.current || now;
+          if (now - noBodySinceRef.current > 5000) {
+            setGuidanceHint('Step back so your full body is visible');
+          }
+        } else {
+          noBodySinceRef.current = 0;
+        }
+
+        if (!ballOk && poseOk) {
+          noBallSinceRef.current = noBallSinceRef.current || now;
+          if (now - noBallSinceRef.current > 5000) {
+            setGuidanceHint('Hold a soccer ball in front of the camera');
+          }
+        } else if (ballOk) {
+          noBallSinceRef.current = 0;
+          setGuidanceHint(null);
+        }
       }
     } catch (err) {
       // Silently continue — single frame error shouldn't crash the loop
@@ -705,7 +735,7 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
             </span>
           </div>
 
-          {/* Confidence */}
+          {/* Confidence + Track confidence */}
           {debugInfo.ballDetected && (
             <div className="flex items-center gap-1 mt-0.5">
               <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
@@ -720,6 +750,22 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
               <span className="text-[9px] text-white/40 font-mono">{debugInfo.ballConf}%</span>
             </div>
           )}
+
+          {/* Phase 3: Track confidence + Ambient */}
+          <div className="flex items-center gap-2 mt-1 pt-1 border-t border-white/5">
+            <span className="text-[8px] text-white/25 font-mono">TRK {debugInfo.trackConf || 0}%</span>
+            <span className="text-[8px] text-white/25 font-mono">AMB {debugInfo.ambient || 0}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ==== Phase 3: Guidance Hint ==== */}
+      {!isCountingDown && isRunning && guidanceHint && (
+        <div className="absolute top-36 left-1/2 -translate-x-1/2 z-30 max-w-xs">
+          <div className="bg-black/70 backdrop-blur-sm rounded-xl px-5 py-3 border border-gold/20 text-center"
+            style={{ animation: 'fadeInUp 0.5s ease-out' }}>
+            <span className="text-gold/90 text-sm font-medium">{guidanceHint}</span>
+          </div>
         </div>
       )}
 
@@ -976,6 +1022,10 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           0% { opacity: 1; }
           70% { opacity: 1; }
           100% { opacity: 0; pointer-events: none; }
+        }
+        @keyframes fadeInUp {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
         }
       `}</style>
     </div>

@@ -1,9 +1,9 @@
 // ============================================
-// STEP 2: Ball Tracking Engine — Phase 2
+// Ball Tracking Engine — Phase 3
 // Hybrid ML + Color + Motion Detection
-// + Color validation for ML detections
-// + Independent color-based ball finder
-// + Multi-frame confirmation buffer
+// + Ambient-adaptive color detection
+// + Background subtraction for motion
+// + Track confidence accumulation
 // + Kalman Filter with gravity model
 // ============================================
 
@@ -46,8 +46,16 @@ const CONFIG = {
   // Tracking
   historyLength: 15,
   lostTimeout: 800,
+  lostTimeoutConfident: 1500,    // Phase 3: Longer timeout when track is confident
   maxJumpDistance: 300,
   bodyMaskRadius: 35,
+
+  // Phase 3: Background subtraction
+  bgLearnRate: 0.015,            // Background model learning rate (slow)
+  bgMotionThreshold: 22,         // Threshold vs background model
+
+  // Phase 3: Ambient-adaptive color detection
+  ambientSampleInterval: 2000,   // Sample ambient brightness every 2s
 
   // Kalman filter tuning
   kalmanProcessNoise: 2.0,
@@ -59,29 +67,33 @@ const CONFIG = {
 };
 
 // ============================================
-// Color Utility — Classify "ball-like" pixels
-// Detects: white panels, neon yellow, orange,
-//          neon green, pink training balls
+// Color Utility — Phase 3: Ambient-adaptive
+// Adjusts thresholds based on scene brightness
 // ============================================
-function isBallLikeColor(r, g, b) {
+function isBallLikeColor(r, g, b, ambientBrightness = 128) {
   const luminance = r * 0.299 + g * 0.587 + b * 0.114;
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
   const sat = max > 0 ? (max - min) / max : 0;
 
-  // White soccer ball panels (high brightness, low saturation)
-  if (luminance > 155 && sat < 0.28) return true;
+  // Phase 3: Adaptive brightness threshold based on ambient lighting
+  // In dark rooms: lower thresholds. In bright rooms: higher thresholds.
+  const whiteLumThreshold = Math.max(95, Math.min(180, ambientBrightness * 0.85 + 40));
+  const colorLumThreshold = Math.max(70, Math.min(140, ambientBrightness * 0.6 + 30));
+
+  // White soccer ball panels (bright relative to scene, low saturation)
+  if (luminance > whiteLumThreshold && sat < 0.3) return true;
 
   // Bright colored training balls
-  if (luminance > 105 && max > 160) {
+  if (luminance > colorLumThreshold && max > 140) {
     // Orange ball (high R, medium G, low B)
-    if (r > 180 && g > 100 && g < 180 && b < 90 && sat > 0.35) return true;
+    if (r > 160 && g > 80 && g < 180 && b < 100 && sat > 0.3) return true;
     // Neon yellow ball (high R, high G, low B)
-    if (r > 175 && g > 175 && b < 100 && sat > 0.35) return true;
+    if (r > 160 && g > 160 && b < 110 && sat > 0.3) return true;
     // Neon green ball (low R, high G, low B)
-    if (g > 175 && r < 150 && b < 100 && sat > 0.35) return true;
+    if (g > 160 && r < 150 && b < 110 && sat > 0.3) return true;
     // Pink/magenta ball
-    if (r > 175 && b > 100 && g < 130 && sat > 0.3) return true;
+    if (r > 160 && b > 90 && g < 130 && sat > 0.25) return true;
   }
 
   return false;
@@ -352,7 +364,7 @@ export class MLBallDetector {
       const step = 3; // Sample every 3rd pixel
 
       for (let i = 0; i < data.length; i += 4 * step) {
-        if (isBallLikeColor(data[i], data[i + 1], data[i + 2])) {
+        if (isBallLikeColor(data[i], data[i + 1], data[i + 2], 128)) {
           ballPixels++;
         }
         total++;
@@ -393,12 +405,24 @@ export class BallTracker {
     this.processCanvas = null;
     this.processCtx = null;
 
-    // Phase 2: Color finder canvas (80px width for speed)
+    // Color finder canvas (80px width for speed)
     this.colorCanvas = null;
     this.colorCtx = null;
 
-    // Phase 2: Multi-frame detection confirmation buffer
+    // Multi-frame detection confirmation buffer
     this.detectionBuffer = [];
+
+    // Phase 3: Background model for motion detection
+    this.backgroundModel = null;
+
+    // Phase 3: Ambient brightness tracking
+    this.ambientBrightness = 128;
+    this.lastAmbientSample = 0;
+
+    // Phase 3: Track confidence (builds with consecutive detections)
+    this.trackConfidence = 0;
+    this.consecutiveDetections = 0;
+    this.consecutiveMisses = 0;
   }
 
   initCanvas(width, height) {
@@ -465,18 +489,26 @@ export class BallTracker {
       }
     }
 
-    // === SOURCE 3: Motion detection (fallback) ===
+    // === SOURCE 3: Motion detection (with background subtraction) ===
     const ctx = this.processCtx;
     ctx.drawImage(videoElement, 0, 0, w, h);
     const currentFrame = ctx.getImageData(0, 0, w, h);
 
-    if (this.prevFrameData && !anyDetection) {
-      const bodyPoints = this.getBodyMaskPoints(poseDetector, w, h);
-      const segMask = poseDetector ? poseDetector.segmentationMask : null;
+    // Phase 3: Sample ambient brightness periodically
+    this.sampleAmbientBrightness(currentFrame.data, w, h);
 
-      const motionMap = this.detectMotion(
-        currentFrame.data, this.prevFrameData.data, w, h, bodyPoints, segMask
-      );
+    // Phase 3: Update background model
+    this.updateBackgroundModel(currentFrame.data, w, h);
+
+    if (!anyDetection) {
+      const bodyPoints = this.getBodyMaskPoints(poseDetector, w, h);
+
+      // Phase 3: Use background subtraction if model is ready, else frame diff
+      const motionMap = this.backgroundModel
+        ? this.detectMotionBgSub(currentFrame.data, w, h, bodyPoints)
+        : (this.prevFrameData
+            ? this.detectMotion(currentFrame.data, this.prevFrameData.data, w, h, bodyPoints, null)
+            : []);
 
       const candidates = this.findBallCandidates(motionMap, w, h);
       const filteredCandidates = this.filterCandidates(candidates, w, h);
@@ -545,6 +577,7 @@ export class BallTracker {
       if (jump > CONFIG.maxJumpDistance) {
         this.history = [];
         this.kalman.reset();
+        this.trackConfidence = Math.max(0, this.trackConfidence - 0.3);
       }
     }
 
@@ -569,11 +602,18 @@ export class BallTracker {
     this.frameCount++;
     this.totalConfidence += this.confidence;
 
+    // Phase 3: Build track confidence with consecutive detections
+    this.consecutiveDetections++;
+    this.consecutiveMisses = 0;
+    const trackGain = source === 'ml' ? 0.15 : source === 'color' ? 0.08 : 0.04;
+    this.trackConfidence = Math.min(1, this.trackConfidence + trackGain);
+
     // Drop check: ball below ankles
     if (poseDetector) {
       const ankleY = poseDetector.getAnkleLevelY(vh);
       if (filtered.y > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
         this.state = BALL_STATES.DROPPED;
+        this.trackConfidence = Math.max(0, this.trackConfidence - 0.2);
         return;
       }
     }
@@ -585,15 +625,29 @@ export class BallTracker {
     const now = Date.now();
     this.confidence = Math.max(0, this.confidence - 0.03);
 
+    // Phase 3: Track consecutive misses, decay track confidence
+    this.consecutiveMisses++;
+    this.consecutiveDetections = 0;
+    if (this.consecutiveMisses > 5) {
+      this.trackConfidence = Math.max(0, this.trackConfidence - 0.02);
+    }
+
+    // Phase 3: Adaptive lost timeout — higher track confidence = longer before dropping
+    const lostTimeout = this.trackConfidence > 0.5
+      ? CONFIG.lostTimeoutConfident
+      : CONFIG.lostTimeout;
+
     const timeSinceLast = now - this.lastDetectedTime;
-    if (timeSinceLast > CONFIG.lostTimeout && this.state === BALL_STATES.TRACKING) {
+    if (timeSinceLast > lostTimeout && this.state === BALL_STATES.TRACKING) {
       this.state = BALL_STATES.DROPPED;
-    } else if (timeSinceLast > CONFIG.lostTimeout * 3) {
+      this.trackConfidence = Math.max(0, this.trackConfidence - 0.15);
+    } else if (timeSinceLast > lostTimeout * 3) {
       this.state = BALL_STATES.NOT_DETECTED;
       this.position = null;
       this.history = [];
       this.kalman.reset();
       this.lastSource = 'none';
+      this.trackConfidence = 0;
     }
   }
 
@@ -643,7 +697,7 @@ export class BallTracker {
           if (nearBody) continue;
 
           const i = (y * cw + x) * 4;
-          if (isBallLikeColor(data[i], data[i + 1], data[i + 2])) {
+          if (isBallLikeColor(data[i], data[i + 1], data[i + 2], this.ambientBrightness)) {
             ballPixels.push({ x, y });
           }
         }
@@ -748,7 +802,77 @@ export class BallTracker {
   }
 
   // ========================================
-  // Body mask + Motion detection
+  // Phase 3: Ambient brightness sampling
+  // ========================================
+  sampleAmbientBrightness(frameData, width, height) {
+    const now = Date.now();
+    if (now - this.lastAmbientSample < CONFIG.ambientSampleInterval) return;
+    this.lastAmbientSample = now;
+
+    let sum = 0, count = 0;
+    const stride = 8;
+    for (let y = 0; y < height; y += stride) {
+      for (let x = 0; x < width; x += stride) {
+        const i = (y * width + x) * 4;
+        sum += frameData[i] * 0.299 + frameData[i + 1] * 0.587 + frameData[i + 2] * 0.114;
+        count++;
+      }
+    }
+    this.ambientBrightness = count > 0 ? sum / count : 128;
+  }
+
+  // ========================================
+  // Phase 3: Background model (IIR filter)
+  // ========================================
+  updateBackgroundModel(frameData, width, height) {
+    const pixelCount = width * height;
+
+    if (!this.backgroundModel) {
+      // Initialize background with first frame
+      this.backgroundModel = new Float32Array(pixelCount);
+      for (let i = 0; i < pixelCount; i++) {
+        const idx = i * 4;
+        this.backgroundModel[i] = (frameData[idx] + frameData[idx + 1] + frameData[idx + 2]) / 3;
+      }
+      return;
+    }
+
+    // Slowly blend current frame into background (IIR low-pass filter)
+    const alpha = CONFIG.bgLearnRate;
+    for (let i = 0; i < pixelCount; i++) {
+      const idx = i * 4;
+      const pixel = (frameData[idx] + frameData[idx + 1] + frameData[idx + 2]) / 3;
+      this.backgroundModel[i] = this.backgroundModel[i] * (1 - alpha) + pixel * alpha;
+    }
+  }
+
+  // Phase 3: Motion detection using background subtraction
+  detectMotionBgSub(current, width, height, bodyPoints) {
+    const motionPixels = [];
+    const stride = CONFIG.stride;
+
+    for (let y = 0; y < height; y += stride) {
+      for (let x = 0; x < width; x += stride) {
+        // Body exclusion
+        if (bodyPoints.length > 0 && this.isNearBody(x, y, bodyPoints)) continue;
+
+        const i = (y * width + x) * 4;
+        const bgIdx = y * width + x;
+        const pixel = (current[i] + current[i + 1] + current[i + 2]) / 3;
+        const bg = this.backgroundModel[bgIdx];
+        const diff = Math.abs(pixel - bg);
+
+        if (diff > CONFIG.bgMotionThreshold) {
+          motionPixels.push({ x, y, intensity: diff });
+        }
+      }
+    }
+
+    return motionPixels;
+  }
+
+  // ========================================
+  // Body mask + Motion detection (fallback)
   // ========================================
 
   getBodyMaskPoints(poseDetector, width, height) {
@@ -1061,6 +1185,11 @@ export class BallTracker {
     this.lastSource = 'none';
     this.kalman.reset();
     this.detectionBuffer = [];
+    // Phase 3 reset
+    this.backgroundModel = null;
+    this.trackConfidence = 0;
+    this.consecutiveDetections = 0;
+    this.consecutiveMisses = 0;
   }
 }
 
