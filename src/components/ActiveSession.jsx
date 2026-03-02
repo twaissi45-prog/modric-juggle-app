@@ -78,6 +78,7 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
 
   // --- ML loading state ---
   const [mlLoadingStatus, setMlLoadingStatus] = useState('loading'); // 'loading' | 'ready' | 'fallback'
+  const [loadingStep, setLoadingStep] = useState('camera'); // 'camera' | 'pose' | 'ml' | 'done'
 
   // --- UI effect state ---
   const [showDrop, setShowDrop] = useState(false);
@@ -258,17 +259,16 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     const vw = video.videoWidth || 640;
     const vh = video.videoHeight || 480;
 
-    // Size canvases ONCE (setting width/height clears the canvas every time)
-    if (!canvasSizedRef.current && vw > 0 && vh > 0) {
-      if (poseCanvasRef.current) {
+    // Size canvases to match video (only when dimensions change)
+    if (vw > 0 && vh > 0) {
+      if (poseCanvasRef.current && poseCanvasRef.current.width !== vw) {
         poseCanvasRef.current.width = vw;
         poseCanvasRef.current.height = vh;
       }
-      if (ballCanvasRef.current) {
+      if (ballCanvasRef.current && ballCanvasRef.current.width !== vw) {
         ballCanvasRef.current.width = vw;
         ballCanvasRef.current.height = vh;
       }
-      canvasSizedRef.current = true;
     }
 
     try {
@@ -307,15 +307,19 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
 
       // 6. Draw pose skeleton overlay (AR wireframe)
       if (poseCanvasRef.current) {
-        const ctx = poseCanvasRef.current.getContext('2d');
-        pose.drawSkeleton(ctx, vw, vh);
+        try {
+          const ctx = poseCanvasRef.current.getContext('2d');
+          pose.drawSkeleton(ctx, vw, vh);
+        } catch (drawErr) { /* skip frame */ }
       }
 
       // 7. Draw ball indicator overlay (AR ball tracking)
       if (ballCanvasRef.current) {
-        const ctx = ballCanvasRef.current.getContext('2d');
-        ctx.clearRect(0, 0, vw, vh);
-        ball.drawBallIndicator(ctx, vw, vh);
+        try {
+          const ctx = ballCanvasRef.current.getContext('2d');
+          ctx.clearRect(0, 0, vw, vh);
+          ball.drawBallIndicator(ctx, vw, vh);
+        } catch (drawErr) { /* skip frame */ }
       }
 
       // 8. Update debug info periodically (every 400ms to avoid re-render spam)
@@ -464,10 +468,12 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
       initEngines();
 
       // 2. Start camera
+      setLoadingStep('camera');
       const cameraOk = await startCamera();
       if (!cameraOk || !mounted) return;
 
       // 3. Initialize pose detector
+      setLoadingStep('pose');
       const pd = poseDetectorRef.current;
       if (pd && videoRef.current) {
         try {
@@ -478,6 +484,7 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
       }
 
       // 4. Initialize ML ball detector (async, don't block game start)
+      setLoadingStep('ml');
       const mlDetector = mlDetectorRef.current;
       if (mlDetector) {
         setMlLoadingStatus('loading');
@@ -485,20 +492,22 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           if (!mounted) return;
           if (mlDetector.isReady) {
             setMlLoadingStatus('ready');
+            setLoadingStep('done');
             console.log('[ActiveSession] ML ball detection ready');
-            // If game already running, start ML loop
             if (isRunningRef.current) {
               startMLDetectionLoop();
             }
           } else {
             setMlLoadingStatus('fallback');
+            setLoadingStep('done');
             console.log('[ActiveSession] ML failed, using motion-only tracking');
           }
         });
       }
 
-      // 5. Start countdown or game (don't wait for ML)
+      // 5. Start countdown or game immediately (don't wait for ML)
       if (!mounted) return;
+      setLoadingStep('done');
 
       if (gameMode === 'ranked' || gameMode === 'drill') {
         startCountdown();
@@ -556,18 +565,87 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         <div className="absolute bottom-0 left-0 right-0 h-28 bg-gradient-to-t from-black/60 to-transparent" />
       </div>
 
-      {/* ==== ML Loading Overlay ==== */}
-      {mlLoadingStatus === 'loading' && !isCountingDown && (
-        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30">
-          <div className="bg-black/60 backdrop-blur-sm rounded-lg px-4 py-2 flex items-center gap-2 border border-white/10">
-            <div className="w-3 h-3 border-2 border-gold border-t-transparent rounded-full animate-spin" />
-            <span className="text-white/70 text-xs font-medium">Loading AI Ball Detection...</span>
+      {/* ==== Loading Progress Overlay ==== */}
+      {loadingStep !== 'done' && (
+        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center px-8">
+          {/* Animated football icon */}
+          <div className="w-16 h-16 mb-6 relative">
+            <svg viewBox="0 0 64 64" className="w-full h-full animate-bounce" style={{ animationDuration: '1.5s' }}>
+              <circle cx="32" cy="32" r="28" fill="none" stroke="rgba(212,175,55,0.6)" strokeWidth="2" />
+              <circle cx="32" cy="32" r="28" fill="none" stroke="rgba(212,175,55,1)" strokeWidth="2"
+                strokeDasharray="176" strokeDashoffset={loadingStep === 'camera' ? '132' : loadingStep === 'pose' ? '88' : loadingStep === 'ml' ? '44' : '0'}
+                style={{ transition: 'stroke-dashoffset 0.5s ease', transform: 'rotate(-90deg)', transformOrigin: 'center' }} />
+              <text x="32" y="36" textAnchor="middle" fill="white" fontSize="20">⚽</text>
+            </svg>
           </div>
+
+          {/* Loading title */}
+          <h3 className="text-white font-bold text-lg mb-2">Setting Up AR</h3>
+
+          {/* Progress steps */}
+          <div className="w-full max-w-xs space-y-2.5 mb-4">
+            {/* Camera */}
+            <div className="flex items-center gap-3">
+              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                loadingStep === 'camera' ? 'bg-gold/20 border border-gold/50 text-gold animate-pulse' :
+                'bg-success/20 border border-success/50 text-success'
+              }`}>
+                {loadingStep === 'camera' ? '•' : '✓'}
+              </div>
+              <span className={`text-sm flex-1 ${loadingStep === 'camera' ? 'text-white' : 'text-white/50'}`}>
+                Camera Access
+              </span>
+              {loadingStep === 'camera' && <div className="w-3 h-3 border-2 border-gold border-t-transparent rounded-full animate-spin" />}
+            </div>
+
+            {/* Pose */}
+            <div className="flex items-center gap-3">
+              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                loadingStep === 'pose' ? 'bg-gold/20 border border-gold/50 text-gold animate-pulse' :
+                loadingStep === 'camera' ? 'bg-white/10 border border-white/20 text-white/30' :
+                'bg-success/20 border border-success/50 text-success'
+              }`}>
+                {loadingStep === 'pose' ? '•' : loadingStep === 'camera' ? '2' : '✓'}
+              </div>
+              <span className={`text-sm flex-1 ${loadingStep === 'pose' ? 'text-white' : loadingStep === 'camera' ? 'text-white/30' : 'text-white/50'}`}>
+                Body Detection AI
+              </span>
+              {loadingStep === 'pose' && <div className="w-3 h-3 border-2 border-gold border-t-transparent rounded-full animate-spin" />}
+            </div>
+
+            {/* ML Ball */}
+            <div className="flex items-center gap-3">
+              <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                loadingStep === 'ml' ? 'bg-gold/20 border border-gold/50 text-gold animate-pulse' :
+                (loadingStep === 'camera' || loadingStep === 'pose') ? 'bg-white/10 border border-white/20 text-white/30' :
+                'bg-success/20 border border-success/50 text-success'
+              }`}>
+                {loadingStep === 'ml' ? '•' : (loadingStep === 'camera' || loadingStep === 'pose') ? '3' : '✓'}
+              </div>
+              <span className={`text-sm flex-1 ${loadingStep === 'ml' ? 'text-white' : (loadingStep === 'camera' || loadingStep === 'pose') ? 'text-white/30' : 'text-white/50'}`}>
+                Ball Detection AI
+              </span>
+              {loadingStep === 'ml' && <div className="w-3 h-3 border-2 border-gold border-t-transparent rounded-full animate-spin" />}
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          <div className="w-full max-w-xs h-1.5 bg-white/10 rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-700 ease-out"
+              style={{
+                width: loadingStep === 'camera' ? '15%' : loadingStep === 'pose' ? '45%' : loadingStep === 'ml' ? '75%' : '100%',
+                background: 'linear-gradient(90deg, #D4AF37, #F5E6A3)',
+              }}
+            />
+          </div>
+
+          <p className="text-white/30 text-xs mt-3">First load takes a few seconds</p>
         </div>
       )}
 
-      {/* ML Ready badge (shows briefly) */}
-      {mlLoadingStatus === 'ready' && !isCountingDown && (
+      {/* ==== ML Status Badge (after loading) ==== */}
+      {loadingStep === 'done' && mlLoadingStatus === 'ready' && !isCountingDown && (
         <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30">
           <div
             className="bg-success/20 backdrop-blur-sm rounded-lg px-4 py-2 flex items-center gap-2 border border-success/30"
@@ -576,13 +654,12 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
             <svg className="w-3 h-3 text-success" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
             </svg>
-            <span className="text-success text-xs font-medium">AI Ball Detection Active</span>
+            <span className="text-success text-xs font-medium">AI Detection Active</span>
           </div>
         </div>
       )}
 
-      {/* ML Fallback notice */}
-      {mlLoadingStatus === 'fallback' && !isCountingDown && (
+      {loadingStep === 'done' && mlLoadingStatus === 'fallback' && !isCountingDown && (
         <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30">
           <div
             className="bg-amber-500/20 backdrop-blur-sm rounded-lg px-4 py-2 flex items-center gap-2 border border-amber-500/30"

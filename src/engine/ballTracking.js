@@ -545,9 +545,7 @@ export class BallTracker {
 
     // Badge background
     ctx.fillStyle = `rgba(0, 0, 0, 0.6)`;
-    ctx.beginPath();
-    ctx.roundRect(x - labelWidth / 2 - 6, y - outerR - 22, labelWidth + 12, 16, 4);
-    ctx.fill();
+    ctx.fillRect(x - labelWidth / 2 - 6, y - outerR - 22, labelWidth + 12, 16);
 
     // Badge text
     ctx.fillStyle = isML ? `rgba(0, 255, 136, 0.95)` : `rgba(255, 180, 0, 0.95)`;
@@ -562,16 +560,12 @@ export class BallTracker {
     const barY = y + outerR + 8;
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.beginPath();
-    ctx.roundRect(barX, barY, barW, barH, 2);
-    ctx.fill();
+    ctx.fillRect(barX, barY, barW, barH);
 
     ctx.fillStyle = this.confidence > 0.6
       ? `rgba(${colorStr}, 0.85)`
       : 'rgba(255, 180, 0, 0.85)';
-    ctx.beginPath();
-    ctx.roundRect(barX, barY, barW * this.confidence, barH, 2);
-    ctx.fill();
+    ctx.fillRect(barX, barY, barW * this.confidence, barH);
 
     // --- Trail line ---
     if (this.history.length > 2) {
