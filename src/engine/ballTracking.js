@@ -1,7 +1,7 @@
 // ============================================
 // STEP 2: Ball Tracking Engine — Hybrid ML + Motion
-// TensorFlow.js COCO-SSD for "sports ball" detection
-// + lightweight motion tracking between ML frames
+// Fixed: CDN loaded via <script> tag (not import())
+// Enhanced: AR ball indicator with bounding box + glow
 // ============================================
 
 export const BALL_STATES = {
@@ -13,9 +13,9 @@ export const BALL_STATES = {
 
 const CONFIG = {
   // ML detection settings
-  mlInterval: 250,            // Run COCO-SSD every 250ms
-  mlMinConfidence: 0.25,      // Minimum "sports ball" confidence from COCO-SSD
-  mlConfidenceBoost: 0.9,     // Confidence assigned to ML detection
+  mlInterval: 250,
+  mlMinConfidence: 0.25,
+  mlConfidenceBoost: 0.9,
 
   // Motion fallback settings
   motionThreshold: 18,
@@ -34,6 +34,22 @@ const CONFIG = {
   bodyMaskRadius: 35,
 };
 
+// Helper: Load CDN script via <script> tag
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) {
+      resolve();
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src;
+    script.crossOrigin = 'anonymous';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+    document.head.appendChild(script);
+  });
+}
+
 // ============================================
 // ML Ball Detector — COCO-SSD wrapper
 // ============================================
@@ -51,34 +67,40 @@ export class MLBallDetector {
     this.isLoading = true;
 
     try {
-      // Load TF.js runtime
-      const tf = await import(
-        /* webpackIgnore: true */
+      console.log('[MLBallDetector] Loading TensorFlow.js...');
+
+      // Step 1: Load TF.js runtime via script tag (sets window.tf)
+      await loadScript(
         'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
       );
 
-      // Set backend to WebGL for GPU acceleration
-      if (window.tf) {
-        await window.tf.setBackend('webgl');
-        await window.tf.ready();
+      if (!window.tf) {
+        throw new Error('window.tf not found after loading TensorFlow.js');
       }
 
-      // Load COCO-SSD model
-      const cocoSsd = await import(
-        /* webpackIgnore: true */
+      // Set backend to WebGL for GPU acceleration
+      await window.tf.setBackend('webgl');
+      await window.tf.ready();
+      console.log('[MLBallDetector] TF.js ready, backend:', window.tf.getBackend());
+
+      // Step 2: Load COCO-SSD model via script tag (sets window.cocoSsd)
+      console.log('[MLBallDetector] Loading COCO-SSD model...');
+      await loadScript(
         'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
       );
 
-      // The model is available on window.cocoSsd after import
-      const loader = window.cocoSsd || cocoSsd;
-      if (loader && loader.load) {
-        this.model = await loader.load({ base: 'lite_mobilenet_v2' });
+      const loader = window.cocoSsd;
+      if (!loader || !loader.load) {
+        throw new Error('window.cocoSsd not found after loading COCO-SSD');
       }
 
+      // Step 3: Load the actual model weights
+      this.model = await loader.load({ base: 'lite_mobilenet_v2' });
+
       this.isReady = true;
-      console.log('[MLBallDetector] COCO-SSD model loaded');
+      console.log('[MLBallDetector] ✅ COCO-SSD model loaded');
     } catch (err) {
-      console.warn('[MLBallDetector] Failed to load COCO-SSD, falling back to motion-only:', err.message);
+      console.warn('[MLBallDetector] ❌ Failed:', err.message);
       this.isReady = false;
     } finally {
       this.isLoading = false;
@@ -90,19 +112,18 @@ export class MLBallDetector {
 
     const now = Date.now();
     if (now - this.lastDetectTime < CONFIG.mlInterval) {
-      return this.lastDetection; // Return cached result
+      return this.lastDetection;
     }
 
     try {
       const predictions = await this.model.detect(videoElement, 10, CONFIG.mlMinConfidence);
 
-      // Filter for "sports ball" class
+      // Filter for ball-like objects
       const ballPredictions = predictions.filter(
-        p => p.class === 'sports ball' || p.class === 'frisbee' // frisbee as fallback for round objects
+        p => p.class === 'sports ball' || p.class === 'frisbee'
       );
 
       if (ballPredictions.length > 0) {
-        // Pick highest confidence ball
         const best = ballPredictions.reduce((a, b) =>
           a.score > b.score ? a : b
         );
@@ -159,7 +180,6 @@ export class BallTracker {
     this.processCtx = this.processCanvas.getContext('2d', { willReadFrequently: true });
   }
 
-  // Main processing — accepts optional ML result
   processFrame(videoElement, poseDetector, mlResult = null) {
     if (!this.processCanvas) {
       this.initCanvas(videoElement.videoWidth || 640, videoElement.videoHeight || 480);
@@ -174,13 +194,12 @@ export class BallTracker {
     if (mlResult && mlResult.source === 'ml') {
       this.lastMLResult = mlResult;
       this.handleMLDetection(mlResult, vw, vh, poseDetector);
-      // Still grab frame data for next motion detection cycle
       this.processCtx.drawImage(videoElement, 0, 0, w, h);
       this.prevFrameData = this.processCtx.getImageData(0, 0, w, h);
       return;
     }
 
-    // === PRIORITY 2: Motion-based interpolation between ML frames ===
+    // === PRIORITY 2: Motion-based tracking between ML frames ===
     const ctx = this.processCtx;
     ctx.drawImage(videoElement, 0, 0, w, h);
     const currentFrame = ctx.getImageData(0, 0, w, h);
@@ -190,43 +209,33 @@ export class BallTracker {
       return;
     }
 
-    // Get body mask points
     const bodyPoints = this.getBodyMaskPoints(poseDetector, w, h);
-    // Also use segmentation mask if available
     const segMask = poseDetector ? poseDetector.segmentationMask : null;
 
-    // Detect motion
     const motionMap = this.detectMotion(
       currentFrame.data, this.prevFrameData.data, w, h, bodyPoints, segMask
     );
 
-    // Find candidates
     const candidates = this.findBallCandidates(motionMap, w, h);
     const filteredCandidates = this.filterCandidates(candidates, w, h);
     const bestCandidate = this.selectBestCandidate(filteredCandidates, w, h);
 
-    // Update state with motion result (lower confidence)
     this.updateStateFromMotion(bestCandidate, poseDetector, w, h);
-
     this.prevFrameData = currentFrame;
   }
 
-  // Handle high-confidence ML detection
   handleMLDetection(mlResult, videoWidth, videoHeight, poseDetector) {
     const now = Date.now();
     const fullX = mlResult.x;
     const fullY = mlResult.y;
 
-    // Jump check
     if (this.position) {
       const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
       if (jump > CONFIG.maxJumpDistance) {
-        // Big jump but ML says ball is here — trust ML, reset tracking
         this.history = [];
       }
     }
 
-    // Update velocity
     if (this.position) {
       this.velocity.x = fullX - this.position.x;
       this.velocity.y = fullY - this.position.y;
@@ -242,7 +251,6 @@ export class BallTracker {
     this.frameCount++;
     this.totalConfidence += this.confidence;
 
-    // Check drop (ball below ankles)
     if (poseDetector) {
       const ankleY = poseDetector.getAnkleLevelY(videoHeight);
       if (fullY > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
@@ -254,7 +262,6 @@ export class BallTracker {
     this.state = BALL_STATES.TRACKING;
   }
 
-  // Motion-based fallback between ML frames
   updateStateFromMotion(candidate, poseDetector, halfW, halfH) {
     const now = Date.now();
 
@@ -262,7 +269,6 @@ export class BallTracker {
       const fullX = candidate.x * 2;
       const fullY = candidate.y * 2;
 
-      // Jump check
       if (this.position) {
         const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
         if (jump > CONFIG.maxJumpDistance) {
@@ -282,12 +288,10 @@ export class BallTracker {
       if (this.history.length > CONFIG.historyLength) this.history.shift();
 
       this.lastDetectedTime = now;
-      // Motion gets lower confidence than ML
       this.confidence = Math.min(1, this.confidence + 0.15);
       this.frameCount++;
       this.totalConfidence += this.confidence;
 
-      // Drop check
       if (poseDetector) {
         const ankleY = poseDetector.getAnkleLevelY(halfH * 2);
         if (fullY > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
@@ -298,7 +302,6 @@ export class BallTracker {
 
       this.state = BALL_STATES.TRACKING;
     } else {
-      // No detection — decay
       this.confidence = Math.max(0, this.confidence - 0.03);
 
       const timeSinceLast = now - this.lastDetectedTime;
@@ -345,7 +348,6 @@ export class BallTracker {
         const diff = Math.abs(gCurr - gPrev);
 
         if (diff > CONFIG.motionThreshold) {
-          // Body masking: skip motion on body
           if (bodyPoints.length > 0 && this.isNearBody(x, y, bodyPoints)) {
             continue;
           }
@@ -441,52 +443,146 @@ export class BallTracker {
     return this.totalConfidence / this.frameCount;
   }
 
+  // ============================================
+  // AR Ball Indicator — Animated bounding box + glow
+  // ============================================
   drawBallIndicator(ctx, width, height) {
     if (!this.position || this.state === BALL_STATES.NOT_DETECTED) return;
+
     const { x, y } = this.position;
+    const isML = this.lastMLResult !== null;
+    const tracking = this.state === BALL_STATES.TRACKING;
+    const color = tracking ? [0, 255, 136] : [255, 68, 68];
+    const colorStr = color.join(',');
 
-    // Outer ring
-    ctx.beginPath();
-    ctx.arc(x, y, 28, 0, Math.PI * 2);
-    ctx.strokeStyle = this.state === BALL_STATES.TRACKING
-      ? `rgba(0, 255, 136, ${0.4 + this.confidence * 0.5})`
-      : 'rgba(255, 68, 68, 0.5)';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
+    // Animated pulse
+    const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+    const outerR = 28 + pulse * 6;
 
-    // Inner dot
+    // --- Background glow ---
     ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = this.state === BALL_STATES.TRACKING
-      ? 'rgba(0, 255, 136, 0.9)'
-      : 'rgba(255, 68, 68, 0.9)';
+    ctx.arc(x, y, outerR + 12, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${colorStr}, 0.06)`;
     ctx.fill();
 
-    // ML badge
-    if (this.lastMLResult) {
-      ctx.font = '9px monospace';
-      ctx.fillStyle = 'rgba(0, 255, 136, 0.7)';
-      ctx.fillText('ML', x + 15, y - 15);
+    // --- Outer animated ring ---
+    ctx.beginPath();
+    ctx.arc(x, y, outerR, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${colorStr}, ${0.3 + this.confidence * 0.5})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // --- Inner ring ---
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${colorStr}, 0.7)`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // --- Crosshair ---
+    const ch = 8;
+    ctx.beginPath();
+    ctx.moveTo(x - ch, y);
+    ctx.lineTo(x + ch, y);
+    ctx.moveTo(x, y - ch);
+    ctx.lineTo(x, y + ch);
+    ctx.strokeStyle = `rgba(${colorStr}, 0.9)`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // --- Center dot ---
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${colorStr}, 1)`;
+    ctx.fill();
+
+    // --- ML Bounding box (dashed) ---
+    if (isML && this.lastMLResult.width) {
+      const hw = this.lastMLResult.width / 2;
+      const hh = this.lastMLResult.height / 2;
+
+      // Corner brackets instead of full box for a techy look
+      const cornerLen = 10;
+      ctx.strokeStyle = `rgba(${colorStr}, 0.6)`;
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'square';
+
+      // Top-left corner
+      ctx.beginPath();
+      ctx.moveTo(x - hw, y - hh + cornerLen);
+      ctx.lineTo(x - hw, y - hh);
+      ctx.lineTo(x - hw + cornerLen, y - hh);
+      ctx.stroke();
+
+      // Top-right corner
+      ctx.beginPath();
+      ctx.moveTo(x + hw - cornerLen, y - hh);
+      ctx.lineTo(x + hw, y - hh);
+      ctx.lineTo(x + hw, y - hh + cornerLen);
+      ctx.stroke();
+
+      // Bottom-left corner
+      ctx.beginPath();
+      ctx.moveTo(x - hw, y + hh - cornerLen);
+      ctx.lineTo(x - hw, y + hh);
+      ctx.lineTo(x - hw + cornerLen, y + hh);
+      ctx.stroke();
+
+      // Bottom-right corner
+      ctx.beginPath();
+      ctx.moveTo(x + hw - cornerLen, y + hh);
+      ctx.lineTo(x + hw, y + hh);
+      ctx.lineTo(x + hw, y + hh - cornerLen);
+      ctx.stroke();
+
+      ctx.lineCap = 'round';
     }
 
-    // Confidence bar
-    const barWidth = 32;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect(x - barWidth / 2, y + 32, barWidth, 3);
-    ctx.fillStyle = this.confidence > 0.6
-      ? 'rgba(0, 255, 136, 0.8)'
-      : 'rgba(255, 180, 0, 0.8)';
-    ctx.fillRect(x - barWidth / 2, y + 32, barWidth * this.confidence, 3);
+    // --- Label badge ---
+    const label = isML ? 'ML BALL' : 'MOTION';
+    ctx.font = 'bold 10px monospace';
+    const labelWidth = ctx.measureText(label).width;
 
-    // Trail
+    // Badge background
+    ctx.fillStyle = `rgba(0, 0, 0, 0.6)`;
+    ctx.beginPath();
+    ctx.roundRect(x - labelWidth / 2 - 6, y - outerR - 22, labelWidth + 12, 16, 4);
+    ctx.fill();
+
+    // Badge text
+    ctx.fillStyle = isML ? `rgba(0, 255, 136, 0.95)` : `rgba(255, 180, 0, 0.95)`;
+    ctx.textAlign = 'center';
+    ctx.fillText(label, x, y - outerR - 10);
+    ctx.textAlign = 'start';
+
+    // --- Confidence bar ---
+    const barW = 40;
+    const barH = 4;
+    const barX = x - barW / 2;
+    const barY = y + outerR + 8;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, barW, barH, 2);
+    ctx.fill();
+
+    ctx.fillStyle = this.confidence > 0.6
+      ? `rgba(${colorStr}, 0.85)`
+      : 'rgba(255, 180, 0, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(barX, barY, barW * this.confidence, barH, 2);
+    ctx.fill();
+
+    // --- Trail line ---
     if (this.history.length > 2) {
       ctx.beginPath();
       ctx.moveTo(this.history[0].x, this.history[0].y);
       for (let i = 1; i < this.history.length; i++) {
+        const alpha = i / this.history.length;
         ctx.lineTo(this.history[i].x, this.history[i].y);
       }
-      ctx.strokeStyle = 'rgba(0, 255, 136, 0.12)';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = `rgba(${colorStr}, 0.18)`;
+      ctx.lineWidth = 2;
       ctx.stroke();
     }
   }

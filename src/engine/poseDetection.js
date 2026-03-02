@@ -1,13 +1,33 @@
 // ============================================
 // STEP 1: Pose Detection Engine
 // MediaPipe Pose setup + landmark processing
+// Fixed: CDN loaded via <script> tag (not import())
+// Enhanced: Neon AR skeleton overlay
 // ============================================
 
+// Helper: Load CDN script via <script> tag — reliable on all mobile browsers
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    // Already loaded?
+    if (document.querySelector(`script[src="${src}"]`)) {
+      resolve();
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src;
+    script.crossOrigin = 'anonymous';
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+    document.head.appendChild(script);
+  });
+}
+
 const POSE_CONFIG = {
-  modelComplexity: 1,
+  modelComplexity: 1,       // 0=lite, 1=full, 2=heavy
   smoothLandmarks: true,
-  minDetectionConfidence: 0.4,  // lowered for mobile — more forgiving
-  minTrackingConfidence: 0.4,   // lowered for mobile
+  enableSegmentation: false, // Skip segmentation for performance
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5,
 };
 
 // Body zone landmark indices (MediaPipe 33 landmarks)
@@ -42,29 +62,47 @@ export class PoseDetector {
     this.onResults = null;
     this.frameCount = 0;
     this.totalConfidence = 0;
-    this.segmentationMask = null; // Exposed for body exclusion in ball tracking
+    this.segmentationMask = null;
+    this._sending = false; // Guard against overlapping send() calls
   }
 
   async initialize(videoElement, onResultsCallback) {
     this.onResults = onResultsCallback;
 
-    // Load MediaPipe Pose from CDN
-    const { Pose } = await import(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js'
-    );
+    try {
+      console.log('[PoseDetector] Loading MediaPipe Pose from CDN...');
 
-    this.pose = new Pose({
-      locateFile: (file) =>
-        `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`,
-    });
+      // Load MediaPipe Pose via <script> tag (UMD — sets window.Pose)
+      await loadScript(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js'
+      );
 
-    this.pose.setOptions(POSE_CONFIG);
+      // Access Pose class from global scope
+      const PoseClass = window.Pose;
+      if (!PoseClass) {
+        throw new Error('window.Pose not found after script load');
+      }
 
-    this.pose.onResults((results) => {
-      this.processResults(results);
-    });
+      console.log('[PoseDetector] Creating Pose instance...');
 
-    this.isInitialized = true;
+      this.pose = new PoseClass({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${file}`,
+      });
+
+      this.pose.setOptions(POSE_CONFIG);
+
+      this.pose.onResults((results) => {
+        this.processResults(results);
+      });
+
+      this.isInitialized = true;
+      console.log('[PoseDetector] ✅ MediaPipe Pose ready');
+    } catch (err) {
+      console.error('[PoseDetector] ❌ Init failed:', err);
+      this.isInitialized = false;
+    }
+
     return this.pose;
   }
 
@@ -79,7 +117,7 @@ export class PoseDetector {
       this.poseConfidence = 0;
     }
 
-    // Store segmentation mask for body exclusion in ball tracking
+    // Store segmentation mask if available
     this.segmentationMask = results.segmentationMask || null;
 
     if (this.onResults) {
@@ -156,9 +194,17 @@ export class PoseDetector {
     return ((maxY - minY) * 100);
   }
 
+  // Guard: only one send() at a time (prevents queue buildup on slow devices)
   async sendFrame(videoElement) {
-    if (this.pose && this.isInitialized) {
-      await this.pose.send({ image: videoElement });
+    if (this.pose && this.isInitialized && !this._sending) {
+      this._sending = true;
+      try {
+        await this.pose.send({ image: videoElement });
+      } catch (err) {
+        // Frame processing error — continue silently
+      } finally {
+        this._sending = false;
+      }
     }
   }
 
@@ -167,47 +213,126 @@ export class PoseDetector {
     this.totalConfidence = 0;
   }
 
+  // ============================================
+  // AR Skeleton Overlay — Neon wireframe
+  // ============================================
   drawSkeleton(ctx, width, height) {
     if (!this.landmarks) return;
 
     ctx.clearRect(0, 0, width, height);
 
-    // Draw connections
-    ctx.strokeStyle = 'rgba(0, 212, 255, 0.5)';
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-
+    // --- Draw skeleton connections with neon glow ---
     for (const [i, j] of SKELETON_CONNECTIONS) {
       const a = this.landmarks[i];
       const b = this.landmarks[j];
       if (a && b && a.visibility > 0.3 && b.visibility > 0.3) {
+        const ax = a.x * width, ay = a.y * height;
+        const bx = b.x * width, by = b.y * height;
+
+        // Outer glow layer
         ctx.beginPath();
-        ctx.moveTo(a.x * width, a.y * height);
-        ctx.lineTo(b.x * width, b.y * height);
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.strokeStyle = 'rgba(0, 220, 255, 0.12)';
+        ctx.lineWidth = 10;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // Mid glow layer
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.strokeStyle = 'rgba(0, 220, 255, 0.3)';
+        ctx.lineWidth = 5;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+
+        // Core line
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.strokeStyle = 'rgba(0, 235, 255, 0.85)';
+        ctx.lineWidth = 2.5;
+        ctx.lineCap = 'round';
         ctx.stroke();
       }
     }
 
-    // Draw landmarks
+    // --- Draw landmark points ---
     for (let i = 0; i < this.landmarks.length; i++) {
       const lm = this.landmarks[i];
       if (lm.visibility > 0.3) {
         const x = lm.x * width;
         const y = lm.y * height;
 
-        // Check if this landmark is in a touch zone
+        // Check if this landmark is a touch zone
         let isZone = false;
+        let zoneType = null;
         for (const zone of Object.values(BODY_ZONES)) {
-          if (zone.landmarks.includes(i)) { isZone = true; break; }
+          if (zone.landmarks.includes(i)) {
+            isZone = true;
+            zoneType = zone.type;
+            break;
+          }
         }
 
-        ctx.beginPath();
-        ctx.arc(x, y, isZone ? 5 : 3, 0, Math.PI * 2);
-        ctx.fillStyle = isZone
-          ? 'rgba(212, 175, 55, 0.8)'
-          : 'rgba(0, 212, 255, 0.6)';
-        ctx.fill();
+        if (isZone) {
+          // Zone landmark — large, colored by type
+          const colors = {
+            foot: { r: 212, g: 175, b: 55 },    // Gold
+            thigh: { r: 100, g: 255, b: 160 },   // Green
+            head: { r: 255, g: 120, b: 120 },     // Red/pink
+          };
+          const c = colors[zoneType] || colors.foot;
+
+          // Glow ring
+          ctx.beginPath();
+          ctx.arc(x, y, 16, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${c.r}, ${c.g}, ${c.b}, 0.12)`;
+          ctx.fill();
+
+          // Outer ring
+          ctx.beginPath();
+          ctx.arc(x, y, 10, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${c.r}, ${c.g}, ${c.b}, 0.6)`;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // Inner dot
+          ctx.beginPath();
+          ctx.arc(x, y, 5, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${c.r}, ${c.g}, ${c.b}, 0.9)`;
+          ctx.fill();
+        } else {
+          // Regular landmark — small cyan dot
+          ctx.beginPath();
+          ctx.arc(x, y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0, 220, 255, 0.6)';
+          ctx.fill();
+        }
       }
+    }
+
+    // --- Draw zone proximity circles (detection areas) ---
+    for (const [name, zone] of Object.entries(BODY_ZONES)) {
+      const pos = this.getZonePosition(name, width, height);
+      if (!pos) continue;
+
+      // Dashed detection radius circle
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, 50, 0, Math.PI * 2);
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = 'rgba(212, 175, 55, 0.18)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Zone label
+      ctx.font = 'bold 9px sans-serif';
+      ctx.fillStyle = 'rgba(212, 175, 55, 0.5)';
+      ctx.textAlign = 'center';
+      ctx.fillText(zone.type.toUpperCase(), pos.x, pos.y - 18);
+      ctx.textAlign = 'start';
     }
   }
 }

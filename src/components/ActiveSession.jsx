@@ -89,6 +89,16 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
   // Active body zones (flash green on touch)
   const [activeZones, setActiveZones] = useState({ foot: false, thigh: false, head: false });
 
+  // --- AR Debug state (updated periodically, not every frame) ---
+  const [debugInfo, setDebugInfo] = useState({
+    poseDetected: false,
+    poseInit: false,
+    ballDetected: false,
+    ballSource: 'None',
+    ballConf: 0,
+    mlStatus: 'loading',
+  });
+
   // --- Refs ---
   const videoRef = useRef(null);
   const poseCanvasRef = useRef(null);
@@ -105,6 +115,8 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
   const wasBallDropped = useRef(false);
   const streamRef = useRef(null);
   const mlLoopRef = useRef(null);
+  const canvasSizedRef = useRef(false);
+  const lastDebugUpdateRef = useRef(0);
 
   // Keep isRunning ref in sync
   useEffect(() => {
@@ -246,14 +258,17 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
     const vw = video.videoWidth || 640;
     const vh = video.videoHeight || 480;
 
-    // Size canvases to match video
-    if (poseCanvasRef.current) {
-      poseCanvasRef.current.width = vw;
-      poseCanvasRef.current.height = vh;
-    }
-    if (ballCanvasRef.current) {
-      ballCanvasRef.current.width = vw;
-      ballCanvasRef.current.height = vh;
+    // Size canvases ONCE (setting width/height clears the canvas every time)
+    if (!canvasSizedRef.current && vw > 0 && vh > 0) {
+      if (poseCanvasRef.current) {
+        poseCanvasRef.current.width = vw;
+        poseCanvasRef.current.height = vh;
+      }
+      if (ballCanvasRef.current) {
+        ballCanvasRef.current.width = vw;
+        ballCanvasRef.current.height = vh;
+      }
+      canvasSizedRef.current = true;
     }
 
     try {
@@ -282,7 +297,6 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         setCombo(0);
         setMultiplier(COMBO_TIERS[0]);
 
-        // Show drop flash
         setShowDrop(true);
         setTimeout(() => setShowDrop(false), 800);
       }
@@ -291,17 +305,33 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         wasBallDropped.current = false;
       }
 
-      // 6. Draw pose skeleton overlay
+      // 6. Draw pose skeleton overlay (AR wireframe)
       if (poseCanvasRef.current) {
         const ctx = poseCanvasRef.current.getContext('2d');
         pose.drawSkeleton(ctx, vw, vh);
       }
 
-      // 7. Draw ball indicator overlay
+      // 7. Draw ball indicator overlay (AR ball tracking)
       if (ballCanvasRef.current) {
         const ctx = ballCanvasRef.current.getContext('2d');
         ctx.clearRect(0, 0, vw, vh);
         ball.drawBallIndicator(ctx, vw, vh);
+      }
+
+      // 8. Update debug info periodically (every 400ms to avoid re-render spam)
+      const now = Date.now();
+      if (now - lastDebugUpdateRef.current > 400) {
+        lastDebugUpdateRef.current = now;
+        setDebugInfo({
+          poseDetected: !!pose.landmarks,
+          poseInit: pose.isInitialized,
+          ballDetected: ball.state === BALL_STATES.TRACKING,
+          ballSource: ball.lastMLResult ? 'ML' : ball.position ? 'Motion' : 'None',
+          ballConf: Math.round(ball.confidence * 100),
+          mlStatus: mlDetector
+            ? mlDetector.isReady ? 'ready' : mlDetector.isLoading ? 'loading' : 'failed'
+            : 'none',
+        });
       }
     } catch (err) {
       // Silently continue — single frame error shouldn't crash the loop
@@ -560,6 +590,53 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           >
             <span className="text-amber-400 text-xs font-medium">Using Motion Detection</span>
           </div>
+        </div>
+      )}
+
+      {/* ==== AR Debug Panel — Shows detection status ==== */}
+      {!isCountingDown && isRunning && (
+        <div className="absolute bottom-20 left-2 z-30 bg-black/70 backdrop-blur-sm rounded-lg px-2.5 py-2 border border-white/10 space-y-1.5" style={{ minWidth: '120px' }}>
+          <div className="text-[8px] text-white/30 uppercase tracking-widest font-bold mb-1">AR Status</div>
+
+          {/* Pose detection */}
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${debugInfo.poseDetected ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.5)]' : debugInfo.poseInit ? 'bg-amber-400' : 'bg-red-400'}`} />
+            <span className="text-[10px] text-white/70 font-mono">
+              BODY {debugInfo.poseDetected ? '✓' : debugInfo.poseInit ? '...' : '✗'}
+            </span>
+          </div>
+
+          {/* Ball detection */}
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${debugInfo.ballDetected ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.5)]' : 'bg-red-400'}`} />
+            <span className="text-[10px] text-white/70 font-mono">
+              BALL {debugInfo.ballSource}
+            </span>
+          </div>
+
+          {/* ML Model status */}
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${debugInfo.mlStatus === 'ready' ? 'bg-green-400' : debugInfo.mlStatus === 'loading' ? 'bg-amber-400 animate-pulse' : 'bg-red-400'}`} />
+            <span className="text-[10px] text-white/70 font-mono">
+              ML {debugInfo.mlStatus === 'ready' ? '✓' : debugInfo.mlStatus === 'loading' ? '⏳' : '✗'}
+            </span>
+          </div>
+
+          {/* Confidence */}
+          {debugInfo.ballDetected && (
+            <div className="flex items-center gap-1 mt-0.5">
+              <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-300"
+                  style={{
+                    width: `${debugInfo.ballConf}%`,
+                    background: debugInfo.ballConf > 60 ? '#00ff88' : '#ffb400',
+                  }}
+                />
+              </div>
+              <span className="text-[9px] text-white/40 font-mono">{debugInfo.ballConf}%</span>
+            </div>
+          )}
         </div>
       )}
 
