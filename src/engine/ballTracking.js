@@ -1,7 +1,10 @@
 // ============================================
-// STEP 2: Ball Tracking Engine — Hybrid ML + Motion
-// + Kalman Filter for smooth position prediction
-// + Gravity model for parabolic ball flight
+// STEP 2: Ball Tracking Engine — Phase 2
+// Hybrid ML + Color + Motion Detection
+// + Color validation for ML detections
+// + Independent color-based ball finder
+// + Multi-frame confirmation buffer
+// + Kalman Filter with gravity model
 // ============================================
 
 export const BALL_STATES = {
@@ -13,9 +16,22 @@ export const BALL_STATES = {
 
 const CONFIG = {
   // ML detection settings
-  mlInterval: 150,            // ← Faster: was 250ms, now 150ms (~7 Hz)
-  mlMinConfidence: 0.25,
+  mlInterval: 150,               // ~7 Hz ML detection
+  mlMinConfidence: 0.12,         // Phase 2: Lower threshold, validate with color
   mlConfidenceBoost: 0.9,
+
+  // Phase 2: Color validation on ML detections
+  colorValidateML: true,
+  colorValidateMinRatio: 0.18,   // At least 18% ball-like pixels in ML bbox
+
+  // Phase 2: Color-based independent ball finder
+  colorFinderEnabled: true,
+  colorFinderWidth: 80,          // Downscale to 80px width for speed
+
+  // Phase 2: Multi-frame confirmation
+  confirmRequired: 2,            // Need 2 detections in window to confirm
+  confirmWindowMs: 700,          // Within 700ms
+  confirmRadiusPx: 80,           // Within 80px
 
   // Motion fallback settings
   motionThreshold: 18,
@@ -34,31 +50,58 @@ const CONFIG = {
   bodyMaskRadius: 35,
 
   // Kalman filter tuning
-  kalmanProcessNoise: 2.0,      // How much we expect position to deviate
-  kalmanVelocityNoise: 80.0,    // High: kicks cause sudden velocity changes
-  kalmanMLNoise: 5.0,           // ML measurements are precise
-  kalmanMotionNoise: 25.0,      // Motion detection is noisier
-  kalmanGravity: 450,           // Pixels/s² downward acceleration
+  kalmanProcessNoise: 2.0,
+  kalmanVelocityNoise: 80.0,
+  kalmanMLNoise: 5.0,            // ML = highest trust
+  kalmanColorNoise: 12.0,        // Color = medium-high trust
+  kalmanMotionNoise: 25.0,       // Motion = lower trust
+  kalmanGravity: 450,            // Pixels/s^2 downward
 };
 
 // ============================================
+// Color Utility — Classify "ball-like" pixels
+// Detects: white panels, neon yellow, orange,
+//          neon green, pink training balls
+// ============================================
+function isBallLikeColor(r, g, b) {
+  const luminance = r * 0.299 + g * 0.587 + b * 0.114;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const sat = max > 0 ? (max - min) / max : 0;
+
+  // White soccer ball panels (high brightness, low saturation)
+  if (luminance > 155 && sat < 0.28) return true;
+
+  // Bright colored training balls
+  if (luminance > 105 && max > 160) {
+    // Orange ball (high R, medium G, low B)
+    if (r > 180 && g > 100 && g < 180 && b < 90 && sat > 0.35) return true;
+    // Neon yellow ball (high R, high G, low B)
+    if (r > 175 && g > 175 && b < 100 && sat > 0.35) return true;
+    // Neon green ball (low R, high G, low B)
+    if (g > 175 && r < 150 && b < 100 && sat > 0.35) return true;
+    // Pink/magenta ball
+    if (r > 175 && b > 100 && g < 130 && sat > 0.3) return true;
+  }
+
+  return false;
+}
+
+// ============================================
 // Kalman Filter — Smooth 2D ball tracking
-// State: [x, y, vx, vy] — predicts between detections
+// State: [x, y, vx, vy] with gravity model
+// Phase 2: Accepts source type for noise tuning
 // ============================================
 class BallKalmanFilter {
   constructor() {
-    // State
     this.x = 0;
     this.y = 0;
     this.vx = 0;
     this.vy = 0;
-
-    // Uncertainty (diagonal covariance approximation)
-    this.px = 100;    // position x uncertainty
-    this.py = 100;    // position y uncertainty
-    this.pvx = 500;   // velocity x uncertainty
-    this.pvy = 500;   // velocity y uncertainty
-
+    this.px = 100;
+    this.py = 100;
+    this.pvx = 500;
+    this.pvy = 500;
     this.initialized = false;
     this.lastTime = 0;
   }
@@ -76,24 +119,17 @@ class BallKalmanFilter {
     this.lastTime = Date.now();
   }
 
-  // Predict next position (call every frame)
   predict() {
     if (!this.initialized) return null;
-
     const now = Date.now();
-    const dt = Math.min((now - this.lastTime) / 1000, 0.1); // Cap at 100ms
+    const dt = Math.min((now - this.lastTime) / 1000, 0.1);
     this.lastTime = now;
-
     if (dt <= 0) return this.getState();
 
-    // Physics: position += velocity * dt
     this.x += this.vx * dt;
     this.y += this.vy * dt;
-
-    // Gravity pulls ball down (positive Y = down in screen coords)
     this.vy += CONFIG.kalmanGravity * dt;
 
-    // Increase uncertainty over time
     this.px += this.pvx * dt * dt + CONFIG.kalmanProcessNoise;
     this.py += this.pvy * dt * dt + CONFIG.kalmanProcessNoise;
     this.pvx += CONFIG.kalmanVelocityNoise * dt;
@@ -102,36 +138,31 @@ class BallKalmanFilter {
     return this.getState();
   }
 
-  // Correct with a measurement (call when ML or motion detects ball)
-  update(measX, measY, isML = false) {
+  // Phase 2: source = 'ml' | 'color' | 'motion'
+  update(measX, measY, source = 'motion') {
     if (!this.initialized) {
       this.init(measX, measY);
       return this.getState();
     }
 
-    // Measurement noise: ML is more precise than motion
-    const r = isML ? CONFIG.kalmanMLNoise : CONFIG.kalmanMotionNoise;
+    const r = source === 'ml' ? CONFIG.kalmanMLNoise
+            : source === 'color' ? CONFIG.kalmanColorNoise
+            : CONFIG.kalmanMotionNoise;
 
-    // Kalman gain (how much to trust the measurement)
     const kx = this.px / (this.px + r);
     const ky = this.py / (this.py + r);
 
-    // Innovation (difference between measurement and prediction)
     const dx = measX - this.x;
     const dy = measY - this.y;
 
-    // Update position
     this.x += kx * dx;
     this.y += ky * dy;
 
-    // Update velocity from innovation
-    // Large innovation = the ball was kicked/bounced, so update velocity
     const dt = Math.max((Date.now() - this.lastTime) / 1000, 0.016);
-    const vGain = isML ? 0.6 : 0.3;
+    const vGain = source === 'ml' ? 0.6 : source === 'color' ? 0.4 : 0.3;
     this.vx = this.vx * (1 - vGain) + (dx / Math.max(dt, 0.016)) * vGain;
     this.vy = this.vy * (1 - vGain) + (dy / Math.max(dt, 0.016)) * vGain;
 
-    // Reduce uncertainty
     this.px *= (1 - kx);
     this.py *= (1 - ky);
     this.pvx *= (1 - vGain * 0.5);
@@ -150,14 +181,10 @@ class BallKalmanFilter {
 
   reset() {
     this.initialized = false;
-    this.x = 0;
-    this.y = 0;
-    this.vx = 0;
-    this.vy = 0;
-    this.px = 100;
-    this.py = 100;
-    this.pvx = 500;
-    this.pvy = 500;
+    this.x = 0; this.y = 0;
+    this.vx = 0; this.vy = 0;
+    this.px = 100; this.py = 100;
+    this.pvx = 500; this.pvy = 500;
   }
 }
 
@@ -178,7 +205,8 @@ function loadScript(src) {
 }
 
 // ============================================
-// ML Ball Detector — COCO-SSD wrapper
+// ML Ball Detector — COCO-SSD + Color Validation
+// Phase 2: Lower threshold + post-validation
 // ============================================
 export class MLBallDetector {
   constructor() {
@@ -187,6 +215,10 @@ export class MLBallDetector {
     this.isReady = false;
     this.lastDetection = null;
     this.lastDetectTime = 0;
+
+    // Phase 2: Validation canvas for color checking
+    this.valCanvas = null;
+    this.valCtx = null;
   }
 
   async initialize() {
@@ -195,8 +227,6 @@ export class MLBallDetector {
 
     try {
       console.log('[MLBallDetector] Loading TensorFlow.js...');
-
-      // Step 1: Load TF.js runtime via script tag (sets window.tf)
       await loadScript(
         'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
       );
@@ -205,12 +235,17 @@ export class MLBallDetector {
         throw new Error('window.tf not found after loading TensorFlow.js');
       }
 
-      // Set backend to WebGL for GPU acceleration
-      await window.tf.setBackend('webgl');
-      await window.tf.ready();
-      console.log('[MLBallDetector] TF.js ready, backend:', window.tf.getBackend());
+      // Try WebGPU first (fastest), fall back to WebGL
+      try {
+        await window.tf.setBackend('webgpu');
+        await window.tf.ready();
+        console.log('[MLBallDetector] TF.js ready, backend: webgpu');
+      } catch (_) {
+        await window.tf.setBackend('webgl');
+        await window.tf.ready();
+        console.log('[MLBallDetector] TF.js ready, backend:', window.tf.getBackend());
+      }
 
-      // Step 2: Load COCO-SSD model via script tag (sets window.cocoSsd)
       console.log('[MLBallDetector] Loading COCO-SSD model...');
       await loadScript(
         'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
@@ -221,17 +256,22 @@ export class MLBallDetector {
         throw new Error('window.cocoSsd not found after loading COCO-SSD');
       }
 
-      // Step 3: Load the actual model weights
       this.model = await loader.load({ base: 'lite_mobilenet_v2' });
-
       this.isReady = true;
-      console.log('[MLBallDetector] ✅ COCO-SSD model loaded');
+      console.log('[MLBallDetector] COCO-SSD model loaded');
     } catch (err) {
-      console.warn('[MLBallDetector] ❌ Failed:', err.message);
+      console.warn('[MLBallDetector] Failed:', err.message);
       this.isReady = false;
     } finally {
       this.isLoading = false;
     }
+  }
+
+  initValidationCanvas() {
+    this.valCanvas = document.createElement('canvas');
+    this.valCanvas.width = 48;
+    this.valCanvas.height = 48;
+    this.valCtx = this.valCanvas.getContext('2d', { willReadFrequently: true });
   }
 
   async detect(videoElement) {
@@ -243,6 +283,7 @@ export class MLBallDetector {
     }
 
     try {
+      // Phase 2: Lower threshold, catch more candidates
       const predictions = await this.model.detect(videoElement, 10, CONFIG.mlMinConfidence);
 
       // Filter for ball-like objects
@@ -250,25 +291,38 @@ export class MLBallDetector {
         p => p.class === 'sports ball' || p.class === 'frisbee'
       );
 
-      if (ballPredictions.length > 0) {
-        const best = ballPredictions.reduce((a, b) =>
-          a.score > b.score ? a : b
-        );
+      // Sort by confidence (highest first)
+      ballPredictions.sort((a, b) => b.score - a.score);
 
-        const [bx, by, bw, bh] = best.bbox;
-        this.lastDetection = {
+      let validDetection = null;
+
+      for (const pred of ballPredictions) {
+        const [bx, by, bw, bh] = pred.bbox;
+
+        // Size sanity check
+        if (bw < 10 || bh < 10 || bw > 400 || bh > 400) continue;
+
+        // Phase 2: Color validation — verify the bbox contains ball-like pixels
+        if (CONFIG.colorValidateML && pred.score < 0.5) {
+          const colorRatio = this.validateColor(videoElement, bx, by, bw, bh);
+          if (colorRatio < CONFIG.colorValidateMinRatio) {
+            continue; // Reject: not enough ball-like pixels
+          }
+        }
+
+        validDetection = {
           x: bx + bw / 2,
           y: by + bh / 2,
           width: bw,
           height: bh,
-          confidence: best.score,
-          class: best.class,
+          confidence: pred.score,
+          class: pred.class,
           source: 'ml',
         };
-      } else {
-        this.lastDetection = null;
+        break; // Use first valid detection
       }
 
+      this.lastDetection = validDetection;
       this.lastDetectTime = now;
     } catch (err) {
       // Silently continue on frame errors
@@ -276,10 +330,40 @@ export class MLBallDetector {
 
     return this.lastDetection;
   }
+
+  // Phase 2: Validate that a detected bbox region contains ball-like colors
+  validateColor(videoElement, bx, by, bw, bh) {
+    if (!this.valCanvas) this.initValidationCanvas();
+
+    try {
+      const cw = this.valCanvas.width;
+      const ch = this.valCanvas.height;
+      this.valCtx.drawImage(videoElement, bx, by, bw, bh, 0, 0, cw, ch);
+      const data = this.valCtx.getImageData(0, 0, cw, ch).data;
+
+      let ballPixels = 0;
+      let total = 0;
+      const step = 3; // Sample every 3rd pixel
+
+      for (let i = 0; i < data.length; i += 4 * step) {
+        if (isBallLikeColor(data[i], data[i + 1], data[i + 2])) {
+          ballPixels++;
+        }
+        total++;
+      }
+
+      return total > 0 ? ballPixels / total : 0;
+    } catch (e) {
+      return 1; // Can't validate, assume OK
+    }
+  }
 }
 
 // ============================================
-// Hybrid Ball Tracker
+// Hybrid Ball Tracker — Phase 2 Enhanced
+// Sources: ML + Color + Motion
+// Features: Kalman filter, multi-frame confirmation,
+//           color-based ball finding, body exclusion
 // ============================================
 export class BallTracker {
   constructor() {
@@ -294,13 +378,21 @@ export class BallTracker {
     this.frameCount = 0;
     this.totalConfidence = 0;
     this.lastMLResult = null;
+    this.lastSource = 'none'; // 'ml' | 'color' | 'motion' | 'none'
 
-    // Kalman filter for smooth tracking
+    // Kalman filter
     this.kalman = new BallKalmanFilter();
 
-    // Hidden canvas for motion processing
+    // Motion processing canvas (half resolution)
     this.processCanvas = null;
     this.processCtx = null;
+
+    // Phase 2: Color finder canvas (80px width for speed)
+    this.colorCanvas = null;
+    this.colorCtx = null;
+
+    // Phase 2: Multi-frame detection confirmation buffer
+    this.detectionBuffer = [];
   }
 
   initCanvas(width, height) {
@@ -308,6 +400,14 @@ export class BallTracker {
     this.processCanvas.width = Math.floor(width / 2);
     this.processCanvas.height = Math.floor(height / 2);
     this.processCtx = this.processCanvas.getContext('2d', { willReadFrequently: true });
+  }
+
+  initColorCanvas(width, height) {
+    const scale = CONFIG.colorFinderWidth / width;
+    this.colorCanvas = document.createElement('canvas');
+    this.colorCanvas.width = CONFIG.colorFinderWidth;
+    this.colorCanvas.height = Math.max(1, Math.round(height * scale));
+    this.colorCtx = this.colorCanvas.getContext('2d', { willReadFrequently: true });
   }
 
   processFrame(videoElement, poseDetector, mlResult = null) {
@@ -320,69 +420,131 @@ export class BallTracker {
     const w = this.processCanvas.width;
     const h = this.processCanvas.height;
 
+    // Track whether any source detected this frame
+    let anyDetection = false;
+
     // === Kalman prediction every frame (smooth interpolation) ===
     if (this.kalman.initialized) {
       const predicted = this.kalman.predict();
       if (predicted) {
-        // Use Kalman-smoothed position as primary position
         this.prevPosition = this.position;
         this.position = { x: predicted.x, y: predicted.y };
         this.velocity = { x: predicted.vx, y: predicted.vy };
       }
     }
 
-    // === PRIORITY 1: Use ML detection if available ===
+    // === SOURCE 1: ML detection (highest priority) ===
     if (mlResult && mlResult.source === 'ml') {
       this.lastMLResult = mlResult;
-      this.handleMLDetection(mlResult, vw, vh, poseDetector);
-      this.processCtx.drawImage(videoElement, 0, 0, w, h);
-      this.prevFrameData = this.processCtx.getImageData(0, 0, w, h);
-      return;
+      this.addDetection(mlResult.x, mlResult.y, 'ml', mlResult.confidence);
+
+      // ML with high confidence → accept immediately
+      // ML with lower confidence → require confirmation
+      if (mlResult.confidence > 0.45 || this.isConfirmed(mlResult.x, mlResult.y)) {
+        this.applyConfirmedDetection(mlResult.x, mlResult.y, 'ml', mlResult.confidence, vw, vh, poseDetector);
+        anyDetection = true;
+      }
     }
 
-    // === PRIORITY 2: Motion-based tracking between ML frames ===
+    // === SOURCE 2: Color-based ball finder (independent of ML) ===
+    if (CONFIG.colorFinderEnabled && !anyDetection) {
+      const colorResult = this.findBallByColor(videoElement, poseDetector, vw, vh);
+      if (colorResult) {
+        this.addDetection(colorResult.x, colorResult.y, 'color', colorResult.confidence);
+
+        if (this.isConfirmed(colorResult.x, colorResult.y)) {
+          this.applyConfirmedDetection(colorResult.x, colorResult.y, 'color', colorResult.confidence, vw, vh, poseDetector);
+          anyDetection = true;
+        }
+      }
+    }
+
+    // === SOURCE 3: Motion detection (fallback) ===
     const ctx = this.processCtx;
     ctx.drawImage(videoElement, 0, 0, w, h);
     const currentFrame = ctx.getImageData(0, 0, w, h);
 
-    if (!this.prevFrameData) {
-      this.prevFrameData = currentFrame;
-      return;
+    if (this.prevFrameData && !anyDetection) {
+      const bodyPoints = this.getBodyMaskPoints(poseDetector, w, h);
+      const segMask = poseDetector ? poseDetector.segmentationMask : null;
+
+      const motionMap = this.detectMotion(
+        currentFrame.data, this.prevFrameData.data, w, h, bodyPoints, segMask
+      );
+
+      const candidates = this.findBallCandidates(motionMap, w, h);
+      const filteredCandidates = this.filterCandidates(candidates, w, h);
+      const bestCandidate = this.selectBestCandidate(filteredCandidates, w, h);
+
+      if (bestCandidate) {
+        const fullX = bestCandidate.x * 2;
+        const fullY = bestCandidate.y * 2;
+        this.addDetection(fullX, fullY, 'motion', 0.3);
+
+        if (this.isConfirmed(fullX, fullY)) {
+          this.applyConfirmedDetection(fullX, fullY, 'motion', 0.3, vw, vh, poseDetector);
+          anyDetection = true;
+        }
+      }
     }
 
-    const bodyPoints = this.getBodyMaskPoints(poseDetector, w, h);
-    const segMask = poseDetector ? poseDetector.segmentationMask : null;
-
-    const motionMap = this.detectMotion(
-      currentFrame.data, this.prevFrameData.data, w, h, bodyPoints, segMask
-    );
-
-    const candidates = this.findBallCandidates(motionMap, w, h);
-    const filteredCandidates = this.filterCandidates(candidates, w, h);
-    const bestCandidate = this.selectBestCandidate(filteredCandidates, w, h);
-
-    this.updateStateFromMotion(bestCandidate, poseDetector, w, h);
     this.prevFrameData = currentFrame;
+
+    // === No confirmed detection → decay ===
+    if (!anyDetection) {
+      this.handleNoDetection();
+    }
   }
 
-  handleMLDetection(mlResult, videoWidth, videoHeight, poseDetector) {
+  // ========================================
+  // Phase 2: Detection confirmation system
+  // ========================================
+
+  addDetection(x, y, source, confidence) {
     const now = Date.now();
-    const fullX = mlResult.x;
-    const fullY = mlResult.y;
+    this.detectionBuffer.push({ x, y, source, confidence, time: now });
+
+    // Prune old entries
+    const cutoff = now - CONFIG.confirmWindowMs;
+    this.detectionBuffer = this.detectionBuffer.filter(d => d.time > cutoff);
+
+    // Keep buffer bounded
+    if (this.detectionBuffer.length > 30) {
+      this.detectionBuffer = this.detectionBuffer.slice(-20);
+    }
+  }
+
+  isConfirmed(x, y) {
+    const now = Date.now();
+    let count = 0;
+    for (const d of this.detectionBuffer) {
+      if (now - d.time < CONFIG.confirmWindowMs) {
+        const dist = Math.hypot(d.x - x, d.y - y);
+        if (dist < CONFIG.confirmRadiusPx) {
+          count++;
+          if (count >= CONFIG.confirmRequired) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Unified handler for any confirmed detection source
+  applyConfirmedDetection(x, y, source, confidence, vw, vh, poseDetector) {
+    const now = Date.now();
 
     // Jump check
     if (this.position) {
-      const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
+      const jump = Math.hypot(x - this.position.x, y - this.position.y);
       if (jump > CONFIG.maxJumpDistance) {
         this.history = [];
         this.kalman.reset();
       }
     }
 
-    // Feed measurement to Kalman filter (ML = high trust)
-    const filtered = this.kalman.update(fullX, fullY, true);
+    // Kalman update with source-appropriate noise
+    const filtered = this.kalman.update(x, y, source);
 
-    // Use Kalman-smoothed position
     this.prevPosition = this.position;
     this.position = { x: filtered.x, y: filtered.y };
     this.velocity = { x: filtered.vx, y: filtered.vy };
@@ -391,13 +553,19 @@ export class BallTracker {
     if (this.history.length > CONFIG.historyLength) this.history.shift();
 
     this.lastDetectedTime = now;
-    this.confidence = Math.min(1, CONFIG.mlConfidenceBoost + mlResult.confidence * 0.1);
+    this.lastSource = source;
+
+    // Confidence based on source
+    const confBoost = source === 'ml' ? CONFIG.mlConfidenceBoost
+                    : source === 'color' ? 0.6
+                    : CONFIG.motionConfidenceBoost;
+    this.confidence = Math.min(1, confBoost + confidence * 0.1);
     this.frameCount++;
     this.totalConfidence += this.confidence;
 
     // Drop check: ball below ankles
     if (poseDetector) {
-      const ankleY = poseDetector.getAnkleLevelY(videoHeight);
+      const ankleY = poseDetector.getAnkleLevelY(vh);
       if (filtered.y > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
         this.state = BALL_STATES.DROPPED;
         return;
@@ -407,63 +575,175 @@ export class BallTracker {
     this.state = BALL_STATES.TRACKING;
   }
 
-  updateStateFromMotion(candidate, poseDetector, halfW, halfH) {
+  handleNoDetection() {
     const now = Date.now();
+    this.confidence = Math.max(0, this.confidence - 0.03);
 
-    if (candidate) {
-      const fullX = candidate.x * 2;
-      const fullY = candidate.y * 2;
-
-      // Jump check
-      if (this.position) {
-        const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
-        if (jump > CONFIG.maxJumpDistance) {
-          this.confidence = Math.max(0, this.confidence - 0.1);
-          return;
-        }
-      }
-
-      // Feed measurement to Kalman filter (motion = lower trust)
-      const filtered = this.kalman.update(fullX, fullY, false);
-
-      // Use Kalman-smoothed position
-      this.prevPosition = this.position;
-      this.position = { x: filtered.x, y: filtered.y };
-      this.velocity = { x: filtered.vx, y: filtered.vy };
-
-      this.history.push({ x: filtered.x, y: filtered.y, time: now });
-      if (this.history.length > CONFIG.historyLength) this.history.shift();
-
-      this.lastDetectedTime = now;
-      this.confidence = Math.min(1, this.confidence + 0.15);
-      this.frameCount++;
-      this.totalConfidence += this.confidence;
-
-      // Drop check
-      if (poseDetector) {
-        const ankleY = poseDetector.getAnkleLevelY(halfH * 2);
-        if (filtered.y > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
-          this.state = BALL_STATES.DROPPED;
-          return;
-        }
-      }
-
-      this.state = BALL_STATES.TRACKING;
-    } else {
-      // No detection — confidence decays, Kalman prediction continues
-      this.confidence = Math.max(0, this.confidence - 0.03);
-
-      const timeSinceLast = now - this.lastDetectedTime;
-      if (timeSinceLast > CONFIG.lostTimeout && this.state === BALL_STATES.TRACKING) {
-        this.state = BALL_STATES.DROPPED;
-      } else if (timeSinceLast > CONFIG.lostTimeout * 3) {
-        this.state = BALL_STATES.NOT_DETECTED;
-        this.position = null;
-        this.history = [];
-        this.kalman.reset();
-      }
+    const timeSinceLast = now - this.lastDetectedTime;
+    if (timeSinceLast > CONFIG.lostTimeout && this.state === BALL_STATES.TRACKING) {
+      this.state = BALL_STATES.DROPPED;
+    } else if (timeSinceLast > CONFIG.lostTimeout * 3) {
+      this.state = BALL_STATES.NOT_DETECTED;
+      this.position = null;
+      this.history = [];
+      this.kalman.reset();
+      this.lastSource = 'none';
     }
   }
+
+  // ========================================
+  // Phase 2: Color-based ball finder
+  // Independent detection — no ML needed
+  // Finds bright circular objects not near body
+  // ========================================
+  findBallByColor(videoElement, poseDetector, vw, vh) {
+    if (!this.colorCanvas) {
+      this.initColorCanvas(vw, vh);
+    }
+
+    const cw = this.colorCanvas.width;
+    const ch = this.colorCanvas.height;
+    const scaleX = vw / cw;
+    const scaleY = vh / ch;
+
+    try {
+      this.colorCtx.drawImage(videoElement, 0, 0, cw, ch);
+      const data = this.colorCtx.getImageData(0, 0, cw, ch).data;
+
+      // Body points at color canvas scale
+      const bodyPts = [];
+      if (poseDetector && poseDetector.landmarks) {
+        for (const lm of poseDetector.landmarks) {
+          if (lm.visibility > 0.3) {
+            bodyPts.push({ x: lm.x * cw, y: lm.y * ch });
+          }
+        }
+      }
+
+      // Find ball-colored pixels (skip body regions)
+      const ballPixels = [];
+      const step = 2; // Every 2nd pixel for speed
+
+      for (let y = 0; y < ch; y += step) {
+        for (let x = 0; x < cw; x += step) {
+          // Quick body exclusion
+          let nearBody = false;
+          for (const bp of bodyPts) {
+            if (Math.abs(x - bp.x) < 6 && Math.abs(y - bp.y) < 6) {
+              nearBody = true;
+              break;
+            }
+          }
+          if (nearBody) continue;
+
+          const i = (y * cw + x) * 4;
+          if (isBallLikeColor(data[i], data[i + 1], data[i + 2])) {
+            ballPixels.push({ x, y });
+          }
+        }
+      }
+
+      if (ballPixels.length < 3 || ballPixels.length > 500) return null;
+
+      // Cluster nearby ball pixels
+      const clusters = this.clusterColorPixels(ballPixels);
+
+      // Score and select best cluster
+      return this.selectBestColorCluster(clusters, cw, ch, scaleX, scaleY);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  clusterColorPixels(pixels) {
+    const clusters = [];
+    const used = new Set();
+
+    for (let i = 0; i < pixels.length; i++) {
+      if (used.has(i)) continue;
+      const cluster = [pixels[i]];
+      used.add(i);
+
+      for (let j = i + 1; j < pixels.length; j++) {
+        if (used.has(j)) continue;
+        const p = pixels[j];
+        const near = cluster.some(
+          c => Math.abs(c.x - p.x) <= 4 && Math.abs(c.y - p.y) <= 4
+        );
+        if (near) {
+          cluster.push(p);
+          used.add(j);
+        }
+      }
+
+      // Ball-sized clusters only (not too small, not too big)
+      if (cluster.length >= 3 && cluster.length <= 60) {
+        clusters.push(cluster);
+      }
+    }
+
+    return clusters;
+  }
+
+  selectBestColorCluster(clusters, frameW, frameH, scaleX, scaleY) {
+    if (clusters.length === 0) return null;
+
+    let best = null;
+    let bestScore = 0;
+
+    for (const cluster of clusters) {
+      const xs = cluster.map(p => p.x);
+      const ys = cluster.map(p => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const w = maxX - minX + 1;
+      const h = maxY - minY + 1;
+      const size = Math.max(w, h);
+
+      // Size filter
+      if (size < 2 || size > 35) continue;
+
+      // Circularity check
+      const aspect = w > 0 && h > 0 ? Math.max(w / h, h / w) : 99;
+      if (aspect > 2.5) continue;
+
+      let score = 0;
+
+      // Circularity bonus (lower aspect ratio = more circular)
+      score += (2.5 - aspect) * 20;
+
+      // Size bonus (prefer medium-sized clusters)
+      score += Math.min(cluster.length, 25) * 2;
+
+      // Proximity to last known position (strong weight)
+      if (this.position) {
+        const cx = (minX + maxX) / 2 * scaleX;
+        const cy = (minY + maxY) / 2 * scaleY;
+        const dist = Math.hypot(cx - this.position.x, cy - this.position.y);
+        score += Math.max(0, 120 - dist);
+      }
+
+      // Prefer lower half of frame (ball is usually near feet/ground)
+      const centerY = (minY + maxY) / 2;
+      if (centerY > frameH * 0.4) score += 10;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = {
+          x: (minX + maxX) / 2 * scaleX,
+          y: (minY + maxY) / 2 * scaleY,
+          confidence: Math.min(1, score / 120),
+          source: 'color',
+        };
+      }
+    }
+
+    return best;
+  }
+
+  // ========================================
+  // Body mask + Motion detection
+  // ========================================
 
   getBodyMaskPoints(poseDetector, width, height) {
     if (!poseDetector || !poseDetector.landmarks) return [];
@@ -490,17 +770,37 @@ export class BallTracker {
     const motionPixels = [];
     const stride = CONFIG.stride;
 
+    // Phase 2: If segmentation mask available, use it for precise body exclusion
+    let segData = null;
+    if (segMask) {
+      try {
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(segMask, 0, 0, width, height);
+        segData = tempCtx.getImageData(0, 0, width, height).data;
+      } catch (e) {
+        segData = null;
+      }
+    }
+
     for (let y = 0; y < height; y += stride) {
       for (let x = 0; x < width; x += stride) {
         const i = (y * width + x) * 4;
+
+        // Body exclusion: seg mask (precise) or landmark radius (fallback)
+        if (segData) {
+          if (segData[i] > 128) continue; // Body pixel
+        } else if (bodyPoints.length > 0 && this.isNearBody(x, y, bodyPoints)) {
+          continue;
+        }
+
         const gCurr = (current[i] + current[i + 1] + current[i + 2]) / 3;
         const gPrev = (previous[i] + previous[i + 1] + previous[i + 2]) / 3;
         const diff = Math.abs(gCurr - gPrev);
 
         if (diff > CONFIG.motionThreshold) {
-          if (bodyPoints.length > 0 && this.isNearBody(x, y, bodyPoints)) {
-            continue;
-          }
           motionPixels.push({ x, y, intensity: diff });
         }
       }
@@ -583,7 +883,6 @@ export class BallTracker {
   }
 
   predictPosition() {
-    // Use Kalman filter prediction instead of simple linear extrapolation
     if (this.kalman.initialized) {
       const state = this.kalman.getState();
       return { x: state.x + state.vx * 0.016, y: state.y + state.vy * 0.016 };
@@ -599,15 +898,23 @@ export class BallTracker {
   }
 
   // ============================================
-  // AR Ball Indicator — Animated bounding box + glow
+  // AR Ball Indicator — Phase 2: Shows source
   // ============================================
   drawBallIndicator(ctx, width, height) {
     if (!this.position || this.state === BALL_STATES.NOT_DETECTED) return;
 
     const { x, y } = this.position;
-    const isML = this.lastMLResult !== null;
     const tracking = this.state === BALL_STATES.TRACKING;
-    const color = tracking ? [0, 255, 136] : [255, 68, 68];
+    const source = this.lastSource;
+
+    // Source-based colors
+    const sourceColors = {
+      ml: [0, 255, 136],       // Green for ML
+      color: [100, 200, 255],  // Light blue for color
+      motion: [255, 180, 0],   // Orange for motion
+      none: [255, 68, 68],     // Red for lost
+    };
+    const color = tracking ? (sourceColors[source] || sourceColors.ml) : [255, 68, 68];
     const colorStr = color.join(',');
 
     // Animated pulse
@@ -651,39 +958,38 @@ export class BallTracker {
     ctx.fillStyle = `rgba(${colorStr}, 1)`;
     ctx.fill();
 
-    // --- ML Bounding box (dashed) ---
-    if (isML && this.lastMLResult.width) {
+    // --- ML Bounding box corners ---
+    if (this.lastMLResult && this.lastMLResult.width && source === 'ml') {
       const hw = this.lastMLResult.width / 2;
       const hh = this.lastMLResult.height / 2;
-
-      // Corner brackets instead of full box for a techy look
       const cornerLen = 10;
+
       ctx.strokeStyle = `rgba(${colorStr}, 0.6)`;
       ctx.lineWidth = 2;
       ctx.lineCap = 'square';
 
-      // Top-left corner
+      // Top-left
       ctx.beginPath();
       ctx.moveTo(x - hw, y - hh + cornerLen);
       ctx.lineTo(x - hw, y - hh);
       ctx.lineTo(x - hw + cornerLen, y - hh);
       ctx.stroke();
 
-      // Top-right corner
+      // Top-right
       ctx.beginPath();
       ctx.moveTo(x + hw - cornerLen, y - hh);
       ctx.lineTo(x + hw, y - hh);
       ctx.lineTo(x + hw, y - hh + cornerLen);
       ctx.stroke();
 
-      // Bottom-left corner
+      // Bottom-left
       ctx.beginPath();
       ctx.moveTo(x - hw, y + hh - cornerLen);
       ctx.lineTo(x - hw, y + hh);
       ctx.lineTo(x - hw + cornerLen, y + hh);
       ctx.stroke();
 
-      // Bottom-right corner
+      // Bottom-right
       ctx.beginPath();
       ctx.moveTo(x + hw - cornerLen, y + hh);
       ctx.lineTo(x + hw, y + hh);
@@ -693,17 +999,16 @@ export class BallTracker {
       ctx.lineCap = 'round';
     }
 
-    // --- Label badge ---
-    const label = isML ? 'ML BALL' : 'MOTION';
+    // --- Label badge (shows detection source) ---
+    const labelMap = { ml: 'ML BALL', color: 'COLOR', motion: 'MOTION' };
+    const label = labelMap[source] || 'TRACKING';
     ctx.font = 'bold 10px monospace';
     const labelWidth = ctx.measureText(label).width;
 
-    // Badge background
-    ctx.fillStyle = `rgba(0, 0, 0, 0.6)`;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.fillRect(x - labelWidth / 2 - 6, y - outerR - 22, labelWidth + 12, 16);
 
-    // Badge text
-    ctx.fillStyle = isML ? `rgba(0, 255, 136, 0.95)` : `rgba(255, 180, 0, 0.95)`;
+    ctx.fillStyle = `rgba(${colorStr}, 0.95)`;
     ctx.textAlign = 'center';
     ctx.fillText(label, x, y - outerR - 10);
     ctx.textAlign = 'start';
@@ -727,7 +1032,6 @@ export class BallTracker {
       ctx.beginPath();
       ctx.moveTo(this.history[0].x, this.history[0].y);
       for (let i = 1; i < this.history.length; i++) {
-        const alpha = i / this.history.length;
         ctx.lineTo(this.history[i].x, this.history[i].y);
       }
       ctx.strokeStyle = `rgba(${colorStr}, 0.18)`;
@@ -748,7 +1052,9 @@ export class BallTracker {
     this.frameCount = 0;
     this.totalConfidence = 0;
     this.lastMLResult = null;
+    this.lastSource = 'none';
     this.kalman.reset();
+    this.detectionBuffer = [];
   }
 }
 

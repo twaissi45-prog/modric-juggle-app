@@ -9,10 +9,11 @@ import { BALL_STATES } from './ballTracking.js';
 
 const CONFIG = {
   proximityThreshold: 90,        // Tighter than 120 — ML gives precise positions
+  proximityThresholdColor: 100,   // Phase 2: Color detection = medium precision
   proximityThresholdMotion: 120,  // Wider for motion-only fallback
-  debounceDuration: 150,          // Fast touch registration
-  minBallConfidence: 0.2,         // Accept low-confidence tracking
-  minPoseVisibility: 0.4,         // Forgiving pose threshold
+  debounceDuration: 120,          // Phase 2: Faster touch registration (was 150)
+  minBallConfidence: 0.15,        // Phase 2: Accept lower-confidence tracking
+  minPoseVisibility: 0.35,        // Phase 2: Slightly more forgiving
   velocityChangeThreshold: 1.5,   // Sensitive to direction changes
   mlConfidenceBonus: 0.3,         // Extra certainty when ML detected the ball
 };
@@ -43,9 +44,12 @@ export class TouchDetector {
     if (!velocityChanged && !movingUp) return null;
 
     // Use tighter threshold when ML is providing positions
-    const isMLTracked = ballTracker.lastMLResult !== null;
-    const threshold = isMLTracked
+    // Phase 2: Also support color-based tracking source
+    const source = ballTracker.lastSource || 'motion';
+    const threshold = source === 'ml'
       ? CONFIG.proximityThreshold
+      : source === 'color'
+      ? CONFIG.proximityThresholdColor
       : CONFIG.proximityThresholdMotion;
 
     // Check proximity to body zones
@@ -64,7 +68,8 @@ export class TouchDetector {
         this.lastTouchTime = now;
         this.touchCount++;
 
-        // ML-tracked touches get higher certainty
+        // Source-based certainty bonus
+        const isMLTracked = source === 'ml';
         const touchCertainty = isMLTracked
           ? Math.min(1, ballTracker.confidence + CONFIG.mlConfidenceBonus)
           : ballTracker.confidence;

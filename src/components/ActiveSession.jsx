@@ -331,7 +331,9 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           poseDetected: !!pose.landmarks,
           poseInit: pose.isInitialized,
           ballDetected: ball.state === BALL_STATES.TRACKING,
-          ballSource: ball.lastMLResult ? 'ML' : ball.position ? 'Motion' : 'None',
+          ballSource: ball.lastSource === 'ml' ? 'ML'
+                    : ball.lastSource === 'color' ? 'Color'
+                    : ball.position ? 'Motion' : 'None',
           ballConf: Math.round(ball.confidence * 100),
           mlStatus: mlDetector
             ? mlDetector.isReady ? 'ready' : mlDetector.isLoading ? 'loading' : 'failed'

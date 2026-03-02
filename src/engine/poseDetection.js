@@ -25,7 +25,8 @@ function loadScript(src) {
 const POSE_CONFIG = {
   modelComplexity: 1,       // 0=lite, 1=full, 2=heavy
   smoothLandmarks: true,
-  enableSegmentation: false, // Skip segmentation for performance
+  enableSegmentation: true,  // Phase 2: Enable for body mask exclusion in ball tracking
+  smoothSegmentation: true,  // Smooth mask across frames
   minDetectionConfidence: 0.5,
   minTrackingConfidence: 0.5,
 };
