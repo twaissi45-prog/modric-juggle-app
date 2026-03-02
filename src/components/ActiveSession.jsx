@@ -470,23 +470,23 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
       // 1. Initialize engines
       initEngines();
 
-      // 2. Start camera
+      // 2. Start camera (ONLY blocking step)
       setLoadingStep('camera');
       const cameraOk = await startCamera();
       if (!cameraOk || !mounted) return;
 
-      // 3. Initialize pose detector
+      // 3. Kick off pose detector (NON-BLOCKING — loads in background)
       setLoadingStep('pose');
       const pd = poseDetectorRef.current;
       if (pd && videoRef.current) {
-        try {
-          await pd.initialize(videoRef.current, () => {});
-        } catch (err) {
-          console.error('Pose init error:', err);
-        }
+        pd.initialize(videoRef.current, () => {}).then(() => {
+          console.log('[ActiveSession] Pose detector ready');
+        }).catch((err) => {
+          console.warn('[ActiveSession] Pose init failed:', err.message);
+        });
       }
 
-      // 4. Initialize ML ball detector (async, don't block game start)
+      // 4. Kick off ML ball detector (NON-BLOCKING — loads in background)
       setLoadingStep('ml');
       const mlDetector = mlDetectorRef.current;
       if (mlDetector) {
@@ -495,20 +495,23 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           if (!mounted) return;
           if (mlDetector.isReady) {
             setMlLoadingStatus('ready');
-            setLoadingStep('done');
             console.log('[ActiveSession] ML ball detection ready');
             if (isRunningRef.current) {
               startMLDetectionLoop();
             }
           } else {
             setMlLoadingStatus('fallback');
-            setLoadingStep('done');
-            console.log('[ActiveSession] ML failed, using motion-only tracking');
+            console.log('[ActiveSession] ML failed, using color + motion tracking');
           }
+        }).catch(() => {
+          if (mounted) setMlLoadingStatus('fallback');
         });
       }
 
-      // 5. Start countdown or game immediately (don't wait for ML)
+      // 5. Wait max 3 seconds for models, then start game regardless
+      //    Models will activate as they finish loading (game loop checks .isInitialized)
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
       if (!mounted) return;
       setLoadingStep('done');
 

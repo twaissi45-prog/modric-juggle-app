@@ -5,10 +5,9 @@
 // Enhanced: Neon AR skeleton overlay
 // ============================================
 
-// Helper: Load CDN script via <script> tag — reliable on all mobile browsers
-function loadScript(src) {
+// Helper: Load CDN script via <script> tag + timeout
+function loadScript(src, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
-    // Already loaded?
     if (document.querySelector(`script[src="${src}"]`)) {
       resolve();
       return;
@@ -16,17 +15,22 @@ function loadScript(src) {
     const script = document.createElement('script');
     script.src = src;
     script.crossOrigin = 'anonymous';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+
+    const timer = setTimeout(() => {
+      console.warn(`[loadScript] Timeout loading: ${src}`);
+      reject(new Error(`Timeout loading: ${src}`));
+    }, timeoutMs);
+
+    script.onload = () => { clearTimeout(timer); resolve(); };
+    script.onerror = () => { clearTimeout(timer); reject(new Error(`Failed to load: ${src}`)); };
     document.head.appendChild(script);
   });
 }
 
 const POSE_CONFIG = {
-  modelComplexity: 1,       // 0=lite, 1=full, 2=heavy
+  modelComplexity: 0,        // Lite model — fastest to download and run
   smoothLandmarks: true,
-  enableSegmentation: true,  // Phase 2: Enable for body mask exclusion in ball tracking
-  smoothSegmentation: true,  // Smooth mask across frames
+  enableSegmentation: false,  // Disabled — too heavy for mobile CDN
   minDetectionConfidence: 0.5,
   minTrackingConfidence: 0.5,
 };

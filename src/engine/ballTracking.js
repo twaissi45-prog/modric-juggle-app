@@ -188,8 +188,8 @@ class BallKalmanFilter {
   }
 }
 
-// Helper: Load CDN script via <script> tag
-function loadScript(src) {
+// Helper: Load CDN script via <script> tag + timeout
+function loadScript(src, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) {
       resolve();
@@ -198,8 +198,14 @@ function loadScript(src) {
     const script = document.createElement('script');
     script.src = src;
     script.crossOrigin = 'anonymous';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load: ${src}`));
+
+    const timer = setTimeout(() => {
+      console.warn(`[loadScript] Timeout loading: ${src}`);
+      reject(new Error(`Timeout loading: ${src}`));
+    }, timeoutMs);
+
+    script.onload = () => { clearTimeout(timer); resolve(); };
+    script.onerror = () => { clearTimeout(timer); reject(new Error(`Failed to load: ${src}`)); };
     document.head.appendChild(script);
   });
 }
