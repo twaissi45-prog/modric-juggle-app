@@ -86,7 +86,7 @@ export default function HomeScreen({ onNavigate, profile }) {
           muted
           loop
           playsInline
-          preload="auto"
+          preload="metadata"
           onLoadedData={() => setVideoReady(true)}
           className="absolute inset-0 w-full h-full object-cover"
           style={{ filter: 'saturate(0.8) brightness(0.75)' }}

@@ -3,20 +3,11 @@
 // Firebase Auth + Navigation + Profile + Cloud
 // ============================================
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, lazy, Suspense } from 'react';
 import './App.css';
 
-import HomeScreen from './components/HomeScreen';
-import EnvironmentCheck from './components/EnvironmentCheck';
-import ActiveSession from './components/ActiveSession';
-import ResultsScreen from './components/ResultsScreen';
-import Leaderboard from './components/Leaderboard';
-import DailyDrill from './components/DailyDrill';
-import GhostDuel from './components/GhostDuel';
-import ProfileScreen from './components/ProfileScreen';
-import ProfileSetup from './components/ProfileSetup';
+// Eagerly loaded — needed for first render
 import AuthScreen from './components/AuthScreen';
-import InstallPrompt from './components/InstallPrompt';
 import VerificationEngine from './engine/verification';
 import soundEngine from './engine/sounds';
 import { onAuthChange, logOut } from './services/auth';
@@ -27,6 +18,30 @@ import {
   hasProfile,
   recordGameResult,
 } from './store/playerProfile';
+
+// Lazy loaded — split into separate chunks, loaded on demand
+const HomeScreen = lazy(() => import('./components/HomeScreen'));
+const EnvironmentCheck = lazy(() => import('./components/EnvironmentCheck'));
+const ActiveSession = lazy(() => import('./components/ActiveSession'));
+const ResultsScreen = lazy(() => import('./components/ResultsScreen'));
+const Leaderboard = lazy(() => import('./components/Leaderboard'));
+const DailyDrill = lazy(() => import('./components/DailyDrill'));
+const GhostDuel = lazy(() => import('./components/GhostDuel'));
+const ProfileScreen = lazy(() => import('./components/ProfileScreen'));
+const ProfileSetup = lazy(() => import('./components/ProfileSetup'));
+const InstallPrompt = lazy(() => import('./components/InstallPrompt'));
+
+// Loading fallback for lazy screens
+function ScreenLoader() {
+  return (
+    <div className="w-full h-full bg-[#030510] flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-10 h-10 rounded-full border-2 border-gold/30 border-t-gold animate-spin" />
+        <span className="text-xs text-white/30 tracking-widest uppercase">Loading</span>
+      </div>
+    </div>
+  );
+}
 
 // App screens
 const SCREENS = {
@@ -294,10 +309,10 @@ export default function App() {
     transitionTo(SCREENS.ENV_CHECK);
   }, [transitionTo]);
 
-  // Play again
+  // Play again — clear data AFTER transition
   const handlePlayAgain = useCallback(() => {
-    setSessionData(null);
     transitionTo(SCREENS.ENV_CHECK);
+    setTimeout(() => setSessionData(null), 300);
   }, [transitionTo]);
 
   // Share challenge
@@ -305,12 +320,14 @@ export default function App() {
     transitionTo(SCREENS.GHOST_DUEL);
   }, [transitionTo]);
 
-  // Go home
+  // Go home — clear data AFTER transition to avoid null crashes during 200ms animation
   const handleHome = useCallback(() => {
-    setSessionData(null);
-    setDrillConfig(null);
-    setChallengeData(null);
     transitionTo(SCREENS.HOME);
+    setTimeout(() => {
+      setSessionData(null);
+      setDrillConfig(null);
+      setChallengeData(null);
+    }, 300);
   }, [transitionTo]);
 
   // Play from duel
@@ -417,15 +434,17 @@ export default function App() {
 
   return (
     <div className="w-full h-full bg-[#030510] relative overflow-hidden">
-      <div
-        className="w-full h-full transition-all duration-200 ease-in-out"
-        style={{
-          opacity: transitioning ? 0 : 1,
-          transform: transitioning ? 'scale(0.98)' : 'scale(1)',
-        }}
-      >
-        {renderScreen()}
-      </div>
+      <Suspense fallback={<ScreenLoader />}>
+        <div
+          className="w-full h-full transition-all duration-200 ease-in-out"
+          style={{
+            opacity: transitioning ? 0 : 1,
+            transform: transitioning ? 'scale(0.98)' : 'scale(1)',
+          }}
+        >
+          {renderScreen()}
+        </div>
+      </Suspense>
 
       {/* PWA Install Prompt — only on home screen */}
       {displayScreen === SCREENS.HOME && <InstallPrompt />}

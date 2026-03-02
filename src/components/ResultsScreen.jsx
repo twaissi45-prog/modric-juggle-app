@@ -25,7 +25,7 @@ export default function ResultsScreen({
     duration = 0,
     gameMode = 'practice',
     verification = { checks: [], isVerified: false, badge: '', overallScore: 0 },
-  } = sessionData;
+  } = sessionData || {};
 
   const [visible, setVisible] = useState(false);
   const [animatedScore, setAnimatedScore] = useState(0);

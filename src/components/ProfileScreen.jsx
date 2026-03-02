@@ -133,7 +133,7 @@ const STAT_ICONS = {
 // Main Component
 // ============================================
 
-export default function ProfileScreen({ profile, onSave, onBack, onNavigate }) {
+export default function ProfileScreen({ profile, firebaseUser, onSave, onBack, onNavigate, onSignOut }) {
   const [visible, setVisible] = useState(false);
   const [editing, setEditing] = useState(false);
 
@@ -695,6 +695,21 @@ export default function ProfileScreen({ profile, onSave, onBack, onNavigate }) {
             </div>
           )}
         </div>
+
+        {/* ====== SIGN OUT ====== */}
+        {firebaseUser && onSignOut && (
+          <div className="mb-5">
+            <button
+              onClick={onSignOut}
+              className="w-full py-3 rounded-xl text-sm font-medium text-alert/60
+                bg-alert/[0.06] border border-alert/15
+                hover:bg-alert/[0.12] hover:text-alert/80
+                active:scale-[0.97] transition-all duration-200 cursor-pointer"
+            >
+              Sign Out
+            </button>
+          </div>
+        )}
 
         {/* ====== BOTTOM SPACER ====== */}
         <div className="h-6" />
