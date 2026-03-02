@@ -1,7 +1,7 @@
 // ============================================
 // STEP 2: Ball Tracking Engine — Hybrid ML + Motion
-// Fixed: CDN loaded via <script> tag (not import())
-// Enhanced: AR ball indicator with bounding box + glow
+// + Kalman Filter for smooth position prediction
+// + Gravity model for parabolic ball flight
 // ============================================
 
 export const BALL_STATES = {
@@ -13,7 +13,7 @@ export const BALL_STATES = {
 
 const CONFIG = {
   // ML detection settings
-  mlInterval: 250,
+  mlInterval: 150,            // ← Faster: was 250ms, now 150ms (~7 Hz)
   mlMinConfidence: 0.25,
   mlConfidenceBoost: 0.9,
 
@@ -32,7 +32,134 @@ const CONFIG = {
   lostTimeout: 800,
   maxJumpDistance: 300,
   bodyMaskRadius: 35,
+
+  // Kalman filter tuning
+  kalmanProcessNoise: 2.0,      // How much we expect position to deviate
+  kalmanVelocityNoise: 80.0,    // High: kicks cause sudden velocity changes
+  kalmanMLNoise: 5.0,           // ML measurements are precise
+  kalmanMotionNoise: 25.0,      // Motion detection is noisier
+  kalmanGravity: 450,           // Pixels/s² downward acceleration
 };
+
+// ============================================
+// Kalman Filter — Smooth 2D ball tracking
+// State: [x, y, vx, vy] — predicts between detections
+// ============================================
+class BallKalmanFilter {
+  constructor() {
+    // State
+    this.x = 0;
+    this.y = 0;
+    this.vx = 0;
+    this.vy = 0;
+
+    // Uncertainty (diagonal covariance approximation)
+    this.px = 100;    // position x uncertainty
+    this.py = 100;    // position y uncertainty
+    this.pvx = 500;   // velocity x uncertainty
+    this.pvy = 500;   // velocity y uncertainty
+
+    this.initialized = false;
+    this.lastTime = 0;
+  }
+
+  init(x, y) {
+    this.x = x;
+    this.y = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.px = 5;
+    this.py = 5;
+    this.pvx = 500;
+    this.pvy = 500;
+    this.initialized = true;
+    this.lastTime = Date.now();
+  }
+
+  // Predict next position (call every frame)
+  predict() {
+    if (!this.initialized) return null;
+
+    const now = Date.now();
+    const dt = Math.min((now - this.lastTime) / 1000, 0.1); // Cap at 100ms
+    this.lastTime = now;
+
+    if (dt <= 0) return this.getState();
+
+    // Physics: position += velocity * dt
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // Gravity pulls ball down (positive Y = down in screen coords)
+    this.vy += CONFIG.kalmanGravity * dt;
+
+    // Increase uncertainty over time
+    this.px += this.pvx * dt * dt + CONFIG.kalmanProcessNoise;
+    this.py += this.pvy * dt * dt + CONFIG.kalmanProcessNoise;
+    this.pvx += CONFIG.kalmanVelocityNoise * dt;
+    this.pvy += CONFIG.kalmanVelocityNoise * dt;
+
+    return this.getState();
+  }
+
+  // Correct with a measurement (call when ML or motion detects ball)
+  update(measX, measY, isML = false) {
+    if (!this.initialized) {
+      this.init(measX, measY);
+      return this.getState();
+    }
+
+    // Measurement noise: ML is more precise than motion
+    const r = isML ? CONFIG.kalmanMLNoise : CONFIG.kalmanMotionNoise;
+
+    // Kalman gain (how much to trust the measurement)
+    const kx = this.px / (this.px + r);
+    const ky = this.py / (this.py + r);
+
+    // Innovation (difference between measurement and prediction)
+    const dx = measX - this.x;
+    const dy = measY - this.y;
+
+    // Update position
+    this.x += kx * dx;
+    this.y += ky * dy;
+
+    // Update velocity from innovation
+    // Large innovation = the ball was kicked/bounced, so update velocity
+    const dt = Math.max((Date.now() - this.lastTime) / 1000, 0.016);
+    const vGain = isML ? 0.6 : 0.3;
+    this.vx = this.vx * (1 - vGain) + (dx / Math.max(dt, 0.016)) * vGain;
+    this.vy = this.vy * (1 - vGain) + (dy / Math.max(dt, 0.016)) * vGain;
+
+    // Reduce uncertainty
+    this.px *= (1 - kx);
+    this.py *= (1 - ky);
+    this.pvx *= (1 - vGain * 0.5);
+    this.pvy *= (1 - vGain * 0.5);
+
+    return this.getState();
+  }
+
+  getState() {
+    return { x: this.x, y: this.y, vx: this.vx, vy: this.vy };
+  }
+
+  getUncertainty() {
+    return Math.sqrt(this.px * this.px + this.py * this.py);
+  }
+
+  reset() {
+    this.initialized = false;
+    this.x = 0;
+    this.y = 0;
+    this.vx = 0;
+    this.vy = 0;
+    this.px = 100;
+    this.py = 100;
+    this.pvx = 500;
+    this.pvy = 500;
+  }
+}
 
 // Helper: Load CDN script via <script> tag
 function loadScript(src) {
@@ -168,6 +295,9 @@ export class BallTracker {
     this.totalConfidence = 0;
     this.lastMLResult = null;
 
+    // Kalman filter for smooth tracking
+    this.kalman = new BallKalmanFilter();
+
     // Hidden canvas for motion processing
     this.processCanvas = null;
     this.processCtx = null;
@@ -189,6 +319,17 @@ export class BallTracker {
     const vh = videoElement.videoHeight || 480;
     const w = this.processCanvas.width;
     const h = this.processCanvas.height;
+
+    // === Kalman prediction every frame (smooth interpolation) ===
+    if (this.kalman.initialized) {
+      const predicted = this.kalman.predict();
+      if (predicted) {
+        // Use Kalman-smoothed position as primary position
+        this.prevPosition = this.position;
+        this.position = { x: predicted.x, y: predicted.y };
+        this.velocity = { x: predicted.vx, y: predicted.vy };
+      }
+    }
 
     // === PRIORITY 1: Use ML detection if available ===
     if (mlResult && mlResult.source === 'ml') {
@@ -229,21 +370,24 @@ export class BallTracker {
     const fullX = mlResult.x;
     const fullY = mlResult.y;
 
+    // Jump check
     if (this.position) {
       const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
       if (jump > CONFIG.maxJumpDistance) {
         this.history = [];
+        this.kalman.reset();
       }
     }
 
-    if (this.position) {
-      this.velocity.x = fullX - this.position.x;
-      this.velocity.y = fullY - this.position.y;
-    }
+    // Feed measurement to Kalman filter (ML = high trust)
+    const filtered = this.kalman.update(fullX, fullY, true);
 
+    // Use Kalman-smoothed position
     this.prevPosition = this.position;
-    this.position = { x: fullX, y: fullY };
-    this.history.push({ x: fullX, y: fullY, time: now });
+    this.position = { x: filtered.x, y: filtered.y };
+    this.velocity = { x: filtered.vx, y: filtered.vy };
+
+    this.history.push({ x: filtered.x, y: filtered.y, time: now });
     if (this.history.length > CONFIG.historyLength) this.history.shift();
 
     this.lastDetectedTime = now;
@@ -251,9 +395,10 @@ export class BallTracker {
     this.frameCount++;
     this.totalConfidence += this.confidence;
 
+    // Drop check: ball below ankles
     if (poseDetector) {
       const ankleY = poseDetector.getAnkleLevelY(videoHeight);
-      if (fullY > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
+      if (filtered.y > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
         this.state = BALL_STATES.DROPPED;
         return;
       }
@@ -269,6 +414,7 @@ export class BallTracker {
       const fullX = candidate.x * 2;
       const fullY = candidate.y * 2;
 
+      // Jump check
       if (this.position) {
         const jump = Math.hypot(fullX - this.position.x, fullY - this.position.y);
         if (jump > CONFIG.maxJumpDistance) {
@@ -277,14 +423,15 @@ export class BallTracker {
         }
       }
 
-      if (this.position) {
-        this.velocity.x = fullX - this.position.x;
-        this.velocity.y = fullY - this.position.y;
-      }
+      // Feed measurement to Kalman filter (motion = lower trust)
+      const filtered = this.kalman.update(fullX, fullY, false);
 
+      // Use Kalman-smoothed position
       this.prevPosition = this.position;
-      this.position = { x: fullX, y: fullY };
-      this.history.push({ x: fullX, y: fullY, time: now });
+      this.position = { x: filtered.x, y: filtered.y };
+      this.velocity = { x: filtered.vx, y: filtered.vy };
+
+      this.history.push({ x: filtered.x, y: filtered.y, time: now });
       if (this.history.length > CONFIG.historyLength) this.history.shift();
 
       this.lastDetectedTime = now;
@@ -292,9 +439,10 @@ export class BallTracker {
       this.frameCount++;
       this.totalConfidence += this.confidence;
 
+      // Drop check
       if (poseDetector) {
         const ankleY = poseDetector.getAnkleLevelY(halfH * 2);
-        if (fullY > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
+        if (filtered.y > ankleY + 50 && this.state === BALL_STATES.TRACKING) {
           this.state = BALL_STATES.DROPPED;
           return;
         }
@@ -302,6 +450,7 @@ export class BallTracker {
 
       this.state = BALL_STATES.TRACKING;
     } else {
+      // No detection — confidence decays, Kalman prediction continues
       this.confidence = Math.max(0, this.confidence - 0.03);
 
       const timeSinceLast = now - this.lastDetectedTime;
@@ -311,6 +460,7 @@ export class BallTracker {
         this.state = BALL_STATES.NOT_DETECTED;
         this.position = null;
         this.history = [];
+        this.kalman.reset();
       }
     }
   }
@@ -433,6 +583,11 @@ export class BallTracker {
   }
 
   predictPosition() {
+    // Use Kalman filter prediction instead of simple linear extrapolation
+    if (this.kalman.initialized) {
+      const state = this.kalman.getState();
+      return { x: state.x + state.vx * 0.016, y: state.y + state.vy * 0.016 };
+    }
     if (this.history.length < 2) return this.position;
     const last = this.history[this.history.length - 1];
     return { x: last.x + this.velocity.x, y: last.y + this.velocity.y };
@@ -593,6 +748,7 @@ export class BallTracker {
     this.frameCount = 0;
     this.totalConfidence = 0;
     this.lastMLResult = null;
+    this.kalman.reset();
   }
 }
 

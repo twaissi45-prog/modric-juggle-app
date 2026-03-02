@@ -191,6 +191,7 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
           facingMode: 'user',
           width: { ideal: 640 },
           height: { ideal: 480 },
+          frameRate: { ideal: 30, min: 15 }, // Request 30fps for smoother tracking
         },
         audio: false,
       });
@@ -233,8 +234,8 @@ export default function ActiveSession({ gameMode = 'practice', drillConfig = nul
         // Silently continue
       }
 
-      // Schedule next ML detection
-      mlLoopRef.current = setTimeout(mlLoop, 250);
+      // Schedule next ML detection (150ms = ~7 Hz)
+      mlLoopRef.current = setTimeout(mlLoop, 150);
     }
 
     mlLoop();
